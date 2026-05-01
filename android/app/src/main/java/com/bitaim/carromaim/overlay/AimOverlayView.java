@@ -49,10 +49,24 @@ public class AimOverlayView extends View {
     private static final int   MAX_LINES  = 7;
     private static final float EMA_ALPHA  = 0.20f;
 
+    /**
+     * Data class returned to FloatingOverlayService for auto-shoot gesture.
+     * strikerX/Y = striker screen position.
+     * targetX/Y  = first intermediate aim point (ghost-ball or wall-bounce point).
+     */
+    public static final class BestShot {
+        public final float strikerX, strikerY;
+        public final float targetX,  targetY;
+        BestShot(float sx, float sy, float tx, float ty) {
+            strikerX=sx; strikerY=sy; targetX=tx; targetY=ty;
+        }
+    }
+
     private final TrajectorySimulator simulator = new TrajectorySimulator();
-    private String    shotMode = MODE_ALL;
+    private String    shotMode  = MODE_ALL;
     private GameState detected;
     private GameState smoothed;
+    private volatile BestShot lastBestShot = null;
     private final float dp;
 
     // ── Paints ───────────────────────────────────────────────────────────────
@@ -167,6 +181,13 @@ public class AimOverlayView extends View {
     public void setShotMode(String mode) { this.shotMode = mode; postInvalidate(); }
     public void setMarginOffset(float dx, float dy) { }
     public void setSensitivity(float v) { }
+
+    /**
+     * Returns the highest-scoring shot from the last rendered frame.
+     * Called by FloatingOverlayService to aim the auto-shoot gesture.
+     * Thread-safe (volatile field).
+     */
+    public BestShot getLastBestShot() { return lastBestShot; }
 
     public void setDetectedState(GameState s) {
         if (s == null) return;
@@ -357,6 +378,21 @@ public class AimOverlayView extends View {
         }
 
         Collections.sort(list, (a, b) -> Float.compare(b.score, a.score));
+
+        // Cache the best shot for auto-shoot gesture injection
+        if (!list.isEmpty() && s.striker != null) {
+            ShotCandidate top = list.get(0);
+            // Use the second waypoint as aim target (first step of the shot path)
+            PointF aimTarget = top.strikerWaypoints.size() > 1
+                    ? top.strikerWaypoints.get(1)
+                    : top.ghostPos();
+            lastBestShot = new BestShot(
+                    s.striker.pos.x, s.striker.pos.y,
+                    aimTarget.x, aimTarget.y);
+        } else {
+            lastBestShot = null;
+        }
+
         return list;
     }
 
