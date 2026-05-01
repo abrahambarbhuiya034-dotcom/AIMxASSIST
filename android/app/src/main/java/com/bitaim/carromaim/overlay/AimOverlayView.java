@@ -62,6 +62,23 @@ public class AimOverlayView extends View {
     private GameState smoothed;
     private final float dp;
 
+    // ── BestShot — used by FloatingOverlayService for AutoPlay gestures ──────
+
+    public static class BestShot {
+        public final float strikerX;
+        public final float strikerY;
+        public final float targetX;
+        public final float targetY;
+        public BestShot(float sx, float sy, float tx, float ty) {
+            strikerX = sx; strikerY = sy; targetX = tx; targetY = ty;
+        }
+    }
+
+    private volatile BestShot lastBestShot;
+
+    /** Returns the most recently computed best shot, or null if none available. */
+    public BestShot getLastBestShot() { return lastBestShot; }
+
     // ── Autoplay ─────────────────────────────────────────────────────────────
     private boolean autoplayEnabled  = false;
     private int     autoplayDelayMs  = 2000;
@@ -187,7 +204,25 @@ public class AimOverlayView extends View {
         if (s == null) return;
         detected = s;
         applySmoothing(s);
+        cacheBestShot();
         postInvalidate();
+    }
+
+    private void cacheBestShot() {
+        GameState s = smoothed != null ? smoothed : detected;
+        if (s == null || s.striker == null) { lastBestShot = null; return; }
+        List<ShotCandidate> shots = computeBestShots(s);
+        if (shots.isEmpty()) { lastBestShot = null; return; }
+        ShotCandidate best = shots.get(0);
+        float dx = best.ghostPos.x - s.striker.pos.x;
+        float dy = best.ghostPos.y - s.striker.pos.y;
+        float dist = (float) Math.sqrt(dx * dx + dy * dy);
+        if (dist < 1f) { lastBestShot = null; return; }
+        float factor = 1.15f;
+        lastBestShot = new BestShot(
+            s.striker.pos.x, s.striker.pos.y,
+            s.striker.pos.x + dx * factor,
+            s.striker.pos.y + dy * factor);
     }
 
     // ── Autoplay ─────────────────────────────────────────────────────────────
@@ -217,6 +252,7 @@ public class AimOverlayView extends View {
         float toY     = s.striker.pos.y + dy * factor;
         int   duration = 80; // ms — fast swipe like a real player
 
+        lastBestShot = new BestShot(s.striker.pos.x, s.striker.pos.y, toX, toY);
         autoplaySwipeListener.onPerformSwipe(
             s.striker.pos.x, s.striker.pos.y, toX, toY, duration);
     }
