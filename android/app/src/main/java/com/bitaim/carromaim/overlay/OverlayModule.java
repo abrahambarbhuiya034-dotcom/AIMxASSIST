@@ -1,10 +1,13 @@
 package com.bitaim.carromaim.overlay;
 
+import android.accessibilityservice.AccessibilityServiceInfo;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
 import android.provider.Settings;
+import android.view.accessibility.AccessibilityManager;
 
+import com.bitaim.carromaim.auto.AutoShootService;
 import com.bitaim.carromaim.capture.MediaProjectionRequestActivity;
 import com.bitaim.carromaim.capture.ScreenCaptureService;
 import com.facebook.react.bridge.Promise;
@@ -14,8 +17,16 @@ import com.facebook.react.bridge.ReactMethod;
 
 import androidx.annotation.NonNull;
 
+import java.util.List;
+
 /**
- * OverlayModule — React Native bridge for overlay + screen capture controls.
+ * OverlayModule — React Native bridge for overlay + screen capture + auto-shoot.
+ *
+ * v5 additions:
+ *  - setAutoPlay(boolean)  — enable/disable auto-shoot
+ *  - isAutoPlayEnabled()   — query current state
+ *  - isAccessibilityReady()— whether AutoShootService is connected
+ *  - requestAccessibilityPermission() — deep-link to Accessibility Settings
  */
 public class OverlayModule extends ReactContextBaseJavaModule {
 
@@ -24,7 +35,8 @@ public class OverlayModule extends ReactContextBaseJavaModule {
     @NonNull @Override
     public String getName() { return "OverlayModule"; }
 
-    /** Check SYSTEM_ALERT_WINDOW (draw over apps). */
+    // ── Overlay permission ────────────────────────────────────────────────────
+
     @ReactMethod
     public void canDrawOverlays(Promise p) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -32,7 +44,6 @@ public class OverlayModule extends ReactContextBaseJavaModule {
         } else p.resolve(true);
     }
 
-    /** Open the system overlay-permission settings page. */
     @ReactMethod
     public void requestOverlayPermission() {
         Intent i = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
@@ -40,6 +51,8 @@ public class OverlayModule extends ReactContextBaseJavaModule {
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         getReactApplicationContext().startActivity(i);
     }
+
+    // ── Overlay service ───────────────────────────────────────────────────────
 
     @ReactMethod
     public void startOverlay(Promise p) {
@@ -60,14 +73,12 @@ public class OverlayModule extends ReactContextBaseJavaModule {
             Intent i = new Intent(getReactApplicationContext(), FloatingOverlayService.class);
             i.setAction("ACTION_STOP");
             getReactApplicationContext().startService(i);
-            // Also stop screen capture since auto-detect makes no sense without overlay
             Intent c = new Intent(getReactApplicationContext(), ScreenCaptureService.class);
             getReactApplicationContext().stopService(c);
             p.resolve(true);
         } catch (Exception e) { p.reject("ERR_STOP", e.getMessage()); }
     }
 
-    /** Launch the system MediaProjection consent dialog (per-session permission). */
     @ReactMethod
     public void requestScreenCapture(Promise p) {
         try {
@@ -78,7 +89,6 @@ public class OverlayModule extends ReactContextBaseJavaModule {
         } catch (Exception e) { p.reject("ERR_CAPTURE", e.getMessage()); }
     }
 
-    /** Stop the auto-detect screen capture loop (overlay keeps running). */
     @ReactMethod
     public void stopScreenCapture(Promise p) {
         try {
@@ -93,7 +103,8 @@ public class OverlayModule extends ReactContextBaseJavaModule {
         p.resolve(ScreenCaptureService.INSTANCE != null);
     }
 
-    // ── Tunables forwarded to live overlay/detector ──────────────────────────
+    // ── Tunables ─────────────────────────────────────────────────────────────
+
     @ReactMethod public void setShotMode(String m) {
         FloatingOverlayService s = FloatingOverlayService.INSTANCE;
         if (s != null) s.setShotMode(m);
@@ -113,5 +124,54 @@ public class OverlayModule extends ReactContextBaseJavaModule {
     @ReactMethod public void setDetectionThreshold(double v) {
         ScreenCaptureService c = ScreenCaptureService.INSTANCE;
         if (c != null) c.setDetectionParam(v);
+    }
+
+    // ── AutoPlay ──────────────────────────────────────────────────────────────
+
+    /**
+     * Enable or disable the auto-shoot feature.
+     * Requires the Accessibility Service to be enabled first.
+     */
+    @ReactMethod
+    public void setAutoPlay(boolean enabled, Promise p) {
+        FloatingOverlayService svc = FloatingOverlayService.INSTANCE;
+        if (svc == null) { p.reject("ERR_NO_SERVICE", "Overlay not started"); return; }
+        if (enabled && !AutoShootService.isReady()) {
+            p.reject("ERR_NO_ACCESSIBILITY",
+                    "Enable AIMxASSIST in Settings → Accessibility first");
+            return;
+        }
+        svc.setAutoPlay(enabled);
+        p.resolve(enabled);
+    }
+
+    /** Returns true if auto-play is currently ON. */
+    @ReactMethod
+    public void isAutoPlayEnabled(Promise p) {
+        FloatingOverlayService svc = FloatingOverlayService.INSTANCE;
+        // Read the field via a simple null-safe pattern
+        if (svc == null) { p.resolve(false); return; }
+        // We expose autoPlayEnabled via a new getter below
+        p.resolve(svc.isAutoPlayEnabled());
+    }
+
+    /**
+     * Returns true if the AutoShootService Accessibility service is connected
+     * and ready to dispatch gestures.
+     */
+    @ReactMethod
+    public void isAccessibilityReady(Promise p) {
+        p.resolve(AutoShootService.isReady());
+    }
+
+    /**
+     * Deep-link to the Accessibility Settings page so the user can
+     * enable "AIMxASSIST" → AIMxASSIST Autoplay.
+     */
+    @ReactMethod
+    public void requestAccessibilityPermission() {
+        Intent i = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        getReactApplicationContext().startActivity(i);
     }
 }
