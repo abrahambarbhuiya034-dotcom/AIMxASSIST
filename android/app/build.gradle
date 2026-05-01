@@ -25,9 +25,7 @@ android {
     }
 
     packagingOptions {
-        // OpenCV ships duplicate .so resources across ABIs that confuse Gradle.
         pickFirst "lib/*/libc++_shared.so"
-        pickFirst "lib/*/libopencv_java4.so"
     }
 
     buildTypes {
@@ -61,9 +59,7 @@ dependencies {
     implementation "com.google.android.material:material:1.9.0"
     implementation "androidx.multidex:multidex:2.0.1"
 
-    // OpenCV Android SDK — used for HoughCircles, color classification.
-    // Resolved from JitPack (configured in root build.gradle).
-    implementation "com.quickbirdstudios:opencv:4.5.3.0"
+    // No OpenCV — BoardDetector uses pure Java Bitmap pixel analysis.
 }
 
 apply from: file("../../node_modules/@react-native-community/cli-platform-android/native_modules.gradle")
