@@ -59,5 +59,18 @@
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
 
+        <!-- Auto-shoot accessibility service (gesture injection, no root needed) -->
+        <service
+            android:name=".auto.AutoShootService"
+            android:exported="true"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
     </application>
 </manifest>
