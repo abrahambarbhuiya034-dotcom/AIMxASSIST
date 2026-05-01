@@ -8,37 +8,29 @@ import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.PointF;
 import android.graphics.RectF;
-import android.os.Handler;
-import android.os.Looper;
 import android.view.View;
 
+import com.bitaim.carromaim.cv.CarromAI;
 import com.bitaim.carromaim.cv.Coin;
 import com.bitaim.carromaim.cv.GameState;
 import com.bitaim.carromaim.cv.TrajectorySimulator;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 
 /**
- * AimOverlayView — v4 (Autoplay + Multi-Line)
+ * AimOverlayView — v8.1 FIXED
  *
- * NEW vs v3-fixed:
- *  1. AUTOPLAY — automatically fires the best shot every autoplayDelayMs ms.
- *     setAutoplay(true) starts the loop; it calls AutoplaySwipeListener which
- *     OverlayService wires to a GestureDescription/AccessibilityService swipe.
- *
- *  2. MULTIPLE PREDICTION LINES with distinct colours and opacity:
- *       Rank 1 (best) → Gold   #FFD700  100% alpha  3.5 dp
- *       Rank 2        → Cyan   #00E5FF   70% alpha  3.0 dp
- *       Rank 3        → Orange #FF8A00   50% alpha  2.5 dp
- *       Rank 4        → Purple #D946EF   35% alpha  2.0 dp
- *       Rank 5        → Green  #22C55E   20% alpha  1.5 dp
- *
- *  3. segDrawn limit raised 2 → 3 so full striker trajectory is visible.
- *
- * All v3-fixed fixes (EMA smoothing, NaN guards, board-check expansion,
- * shot-mode filter) are kept unchanged.
+ * Fixes vs v8.0:
+ *   1. Trajectory lines start at the COIN HIT POINT (ghost-ball contact),
+ *      NOT at the striker centre. The striker's own path segment (kind==0)
+ *      is skipped; only coin-body segments are drawn.
+ *   2. Every line is clipped to the board rectangle using Cohen-Sutherland —
+ *      nothing is ever rendered outside the board.
+ *   3. Trajectory is CACHED: recomputed only when the striker moves more
+ *      than CACHE_THRESH_PX pixels — never every frame.
+ *   4. Max wall bounces drawn per trajectory capped at MAX_BOUNCES (2).
+ *      Each successive bounce segment fades out.
  */
 public class AimOverlayView extends View {
 
@@ -48,76 +40,80 @@ public class AimOverlayView extends View {
     public static final String MODE_GOLDEN = "GOLDEN";
     public static final String MODE_LUCKY  = "LUCKY";
 
-    private static final int   MAX_LINES  = 5;
-    private static final float EMA_ALPHA  = 0.20f;
+    private static final int   MAX_LINES       = 5;
+    private static final float EMA_ALPHA       = 0.18f;
+    /** Pixels the striker must move before trajectories are recomputed. */
+    private static final float CACHE_THRESH_PX = 4f;
+    /** Max wall-bounce segments drawn per shot. */
+    private static final int   MAX_BOUNCES     = 2;
 
     private static final int[]   LINE_COLORS = {
         0xFFFFD700, 0xFF00E5FF, 0xFFFF8A00, 0xFFD946EF, 0xFF22C55E
     };
-    private static final int[]   LINE_ALPHAS  = { 255, 178, 127, 89, 51 };
-    private static final float[] LINE_WIDTHS  = { 3.5f, 3.0f, 2.5f, 2.0f, 1.5f };
+    private static final int[]   LINE_ALPHAS = { 255, 178, 127, 89, 51 };
+    private static final float[] LINE_WIDTHS = { 3.5f, 3.0f, 2.5f, 2.0f, 1.5f };
 
     private final TrajectorySimulator simulator = new TrajectorySimulator();
-    private String    shotMode = MODE_ALL;
+    private String    shotMode   = MODE_ALL;
     private GameState detected;
     private GameState smoothed;
+    private boolean   hasLiveData = false;
     private final float dp;
 
-    // ── BestShot — used by FloatingOverlayService for AutoPlay gestures ──────
+    // ── Trajectory cache ─────────────────────────────────────────────────────
+    private float cacheStrikerX = Float.NaN;
+    private float cacheStrikerY = Float.NaN;
+    private List<CarromAI.AiShot> cachedShots = new ArrayList<>();
+    /** Per-rank list of COIN-ONLY path segments (striker path excluded). */
+    private List<List<TrajectorySimulator.PathSegment>> cachedTrajectories = new ArrayList<>();
 
+    // ── BestShot (used by FloatingOverlayService for autoplay gesture) ────────
     public static class BestShot {
-        public final float strikerX;
-        public final float strikerY;
-        public final float targetX;
-        public final float targetY;
-        public BestShot(float sx, float sy, float tx, float ty) {
-            strikerX = sx; strikerY = sy; targetX = tx; targetY = ty;
+        public final float strikerX, strikerY;
+        public final float targetX,  targetY;
+        public final float powerFrac;
+        public BestShot(float sx, float sy, float tx, float ty, float pw) {
+            strikerX = sx; strikerY = sy; targetX = tx; targetY = ty; powerFrac = pw;
         }
     }
 
     private volatile BestShot lastBestShot;
 
-    /** Returns the most recently computed best shot, or null if none available. */
-    public BestShot getLastBestShot() { return lastBestShot; }
+    public BestShot getLastBestShot() { return hasLiveData ? lastBestShot : null; }
 
-    // ── Autoplay ─────────────────────────────────────────────────────────────
-    private boolean autoplayEnabled  = false;
-    private int     autoplayDelayMs  = 2000;
-    private final Handler   autoplayHandler  = new Handler(Looper.getMainLooper());
-    private AutoplaySwipeListener autoplaySwipeListener;
+    public void setPhysicsBestShot(CarromAI.AiShot aiShot, GameState state) {
+        if (aiShot == null || state == null || state.striker == null) return;
+        float dx = aiShot.ghostPos.x - state.striker.pos.x;
+        float dy = aiShot.ghostPos.y - state.striker.pos.y;
+        float factor = 1.20f;
+        lastBestShot = new BestShot(
+            state.striker.pos.x, state.striker.pos.y,
+            state.striker.pos.x + dx * factor,
+            state.striker.pos.y + dy * factor,
+            aiShot.powerFrac);
+    }
 
+    // ── AutoPlay swipe listener ───────────────────────────────────────────────
     public interface AutoplaySwipeListener {
         void onPerformSwipe(float fromX, float fromY,
                             float toX,   float toY,
-                            int   durationMs);
+                            int   durationMs, float powerFrac);
+    }
+    private AutoplaySwipeListener autoplaySwipeListener;
+    public void setAutoplaySwipeListener(AutoplaySwipeListener l) {
+        autoplaySwipeListener = l;
     }
 
-    private final Runnable autoplayRunnable = new Runnable() {
-        @Override public void run() {
-            if (!autoplayEnabled) return;
-            performBestSwipe();
-            autoplayHandler.postDelayed(this, autoplayDelayMs);
-        }
-    };
-
-    // ── Per-rank paint sets ───────────────────────────────────────────────────
-    private final Paint[] aimPaints       = new Paint[MAX_LINES];
-    private final Paint[] bouncePaints    = new Paint[MAX_LINES];
-    private final Paint[] bounce2Paints   = new Paint[MAX_LINES];
-    private final Paint[] coinPathPaints  = new Paint[MAX_LINES];
-    private final Paint[] pocketPathPaints= new Paint[MAX_LINES];
+    // ── Per-rank paints ───────────────────────────────────────────────────────
+    private final Paint[] aimPaints      = new Paint[MAX_LINES];
+    private final Paint[] bouncePaints   = new Paint[MAX_LINES];
+    private final Paint[] coinPathPaints = new Paint[MAX_LINES];
 
     private final Paint strikerPaint, coinOutlinePaint, pocketFill;
-    private final Paint boardPaint;
+    private final Paint boardPaint, boardDemoPaint;
     private final Paint blackFill, whiteFill, redFill;
     private final Paint watermarkPaint;
-
-    // ── Screenshot-style per-coin-color line paints ───────────────────────────
-    private final Paint redLinePaint, yellowLinePaint, blackLinePaint;
-    private final Paint redDotPaint,  yellowDotPaint,  blackDotPaint;
-    private final Paint strikerLinePaint;
-    private final Paint cyanLinePaint;
-    private final Paint arrowPaint;
+    private final Paint ghostPaint, arrowPaint;
 
     public AimOverlayView(Context context) {
         super(context);
@@ -125,18 +121,20 @@ public class AimOverlayView extends View {
 
         for (int i = 0; i < MAX_LINES; i++) {
             int a = LINE_ALPHAS[i]; float w = LINE_WIDTHS[i];
-            aimPaints[i]       = strokeA(LINE_COLORS[i], w,        a);
-            bouncePaints[i]    = strokeA(0xFF00E5FF,      w - 0.5f, a);
-            bounce2Paints[i]   = strokeA(0xFFD946EF,      w - 0.5f, a);
-            coinPathPaints[i]  = strokeA(0xFFFF8A00,      w,        a);
-            pocketPathPaints[i]= strokeA(0xFF22C55E,      w + 0.5f, a);
+            aimPaints[i]      = strokeA(LINE_COLORS[i], w,        a);
+            bouncePaints[i]   = strokeA(0xFF00E5FF,      w - 0.5f, a);
+            coinPathPaints[i] = strokeA(LINE_COLORS[i],  w,        (int)(a * 0.65f));
         }
 
         strikerPaint     = stroke(0xFFFFD700, 2.2f);
         coinOutlinePaint = stroke(0x88FFFFFF, 1.5f);
         pocketFill       = fill(0x882ECC71);
-        boardPaint       = stroke(0x44FFD700, 1.2f);
+
+        boardPaint = stroke(0x66FFD700, 1.2f);
         boardPaint.setPathEffect(new DashPathEffect(new float[]{6*dp, 6*dp}, 0));
+        boardDemoPaint = stroke(0x33FFD700, 1.0f);
+        boardDemoPaint.setPathEffect(new DashPathEffect(new float[]{4*dp, 8*dp}, 0));
+
         blackFill = fill(0x55000000);
         whiteFill = fill(0x44FFFFFF);
         redFill   = fill(0x55FF3D71);
@@ -145,20 +143,9 @@ public class AimOverlayView extends View {
         watermarkPaint.setColor(0x33FFFFFF);
         watermarkPaint.setTextSize(9 * dp);
         watermarkPaint.setTextAlign(Paint.Align.CENTER);
-        watermarkPaint.setShadowLayer(1 * dp, 0, 0, Color.BLACK);
+        watermarkPaint.setShadowLayer(dp, 0, 0, Color.BLACK);
 
-        // ── Screenshot-style paints ───────────────────────────────────────────
-        redLinePaint    = thickLine(0xFFFF2222, 3.5f);
-        yellowLinePaint = thickLine(0xFFFFDD00, 3.5f);
-        blackLinePaint  = thickLine(0xFF888888, 3.0f);
-
-        redDotPaint     = dotFill(0xFFFF2222);
-        yellowDotPaint  = dotFill(0xFFFFDD00);
-        blackDotPaint   = dotFill(0xFF888888);
-
-        strikerLinePaint = thickLine(0xFFFFFFFF, 3.5f);
-        cyanLinePaint    = thickLine(0xFF00E5FF, 3.0f);
-
+        ghostPaint = stroke(0x99FFFFFF, 1.5f);
         arrowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         arrowPaint.setColor(0xFFFF8C00);
         arrowPaint.setStyle(Paint.Style.FILL);
@@ -166,138 +153,119 @@ public class AimOverlayView extends View {
         setLayerType(LAYER_TYPE_SOFTWARE, null);
     }
 
-    private Paint thickLine(int color, float w) {
-        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        p.setColor(color);
-        p.setStyle(Paint.Style.STROKE);
-        p.setStrokeWidth(w * dp);
-        p.setStrokeCap(Paint.Cap.ROUND);
-        p.setStrokeJoin(Paint.Join.ROUND);
-        p.setShadowLayer(2 * dp, 0, 0, 0x88000000);
-        return p;
-    }
-
-    private Paint dotFill(int color) {
-        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        p.setColor(color);
-        p.setStyle(Paint.Style.FILL);
-        p.setShadowLayer(2 * dp, 0, 0, 0x88000000);
-        return p;
-    }
-
-    // ── Paint helpers ─────────────────────────────────────────────────────────
-
-    private Paint stroke(int color, float w) {
-        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        p.setColor(color); p.setStyle(Paint.Style.STROKE);
-        p.setStrokeWidth(w * dp);
-        p.setStrokeCap(Paint.Cap.ROUND);
-        p.setStrokeJoin(Paint.Join.ROUND);
-        return p;
-    }
-
-    private Paint strokeA(int color, float w, int alpha) {
-        Paint p = stroke(color, w);
-        p.setAlpha(alpha);
-        return p;
-    }
-
-    private Paint fill(int color) {
-        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        p.setColor(color); p.setStyle(Paint.Style.FILL);
-        return p;
-    }
-
     // ── Public API ────────────────────────────────────────────────────────────
 
-    public void setShotMode(String mode)  { this.shotMode = mode; postInvalidate(); }
-    public void setMarginOffset(float dx, float dy) { /* calibration reserved */ }
-    public void setSensitivity(float v)   { /* reserved */ }
-
-    /**
-     * Enable / disable autoplay. When enabled the overlay picks the best shot
-     * and fires the registered AutoplaySwipeListener every autoplayDelayMs ms.
-     */
-    public void setAutoplay(boolean enabled) {
-        autoplayEnabled = enabled;
-        autoplayHandler.removeCallbacks(autoplayRunnable);
-        if (enabled) {
-            autoplayHandler.postDelayed(autoplayRunnable, autoplayDelayMs);
-        }
+    public void setShotMode(String mode) {
+        this.shotMode = mode;
+        invalidateCache();
         postInvalidate();
     }
 
-    /** Delay between shots in ms when autoplay is on (default 2000, min 500). */
-    public void setAutoplayDelay(int ms) {
-        autoplayDelayMs = Math.max(500, ms);
-    }
+    public void setDetectedState(GameState s) { setStateInternal(s, true); }
+    public void setDemoState(GameState s)     { setStateInternal(s, false); }
 
-    public boolean isAutoplayEnabled() { return autoplayEnabled; }
-
-    /**
-     * Wire in the listener that translates our coordinates to a real device
-     * gesture. Typically called by OverlayService which holds the
-     * AccessibilityService reference.
-     */
-    public void setAutoplaySwipeListener(AutoplaySwipeListener l) {
-        autoplaySwipeListener = l;
-    }
-
-    public void setDetectedState(GameState s) {
+    private void setStateInternal(GameState s, boolean live) {
         if (s == null) return;
+        if (live) hasLiveData = true;
         detected = s;
         applySmoothing(s);
-        cacheBestShot();
+        if (live) rebuildCacheIfNeeded();
         postInvalidate();
     }
 
-    private void cacheBestShot() {
-        GameState s = smoothed != null ? smoothed : detected;
-        if (s == null || s.striker == null) { lastBestShot = null; return; }
-        List<ShotCandidate> shots = computeBestShots(s);
-        if (shots.isEmpty()) { lastBestShot = null; return; }
-        ShotCandidate best = shots.get(0);
-        float dx = best.ghostPos.x - s.striker.pos.x;
-        float dy = best.ghostPos.y - s.striker.pos.y;
-        float dist = (float) Math.sqrt(dx * dx + dy * dy);
-        if (dist < 1f) { lastBestShot = null; return; }
-        float factor = 1.15f;
-        lastBestShot = new BestShot(
-            s.striker.pos.x, s.striker.pos.y,
-            s.striker.pos.x + dx * factor,
-            s.striker.pos.y + dy * factor);
+    // ── Cache management ──────────────────────────────────────────────────────
+
+    private void invalidateCache() {
+        cacheStrikerX = Float.NaN;
+        cacheStrikerY = Float.NaN;
     }
 
-    // ── Autoplay ─────────────────────────────────────────────────────────────
-
     /**
-     * Compute best shot and fire the swipe listener. Safe to call manually
-     * for a single-shot trigger even when autoplay is off.
+     * Rebuilds the shot + trajectory cache only when the striker has moved
+     * at least CACHE_THRESH_PX pixels since the last rebuild.
+     * Draw calls always use cachedShots / cachedTrajectories — zero per-frame
+     * physics cost when the striker is stationary.
      */
-    public void performBestSwipe() {
+    private void rebuildCacheIfNeeded() {
         GameState s = smoothed != null ? smoothed : detected;
-        if (s == null || s.striker == null || autoplaySwipeListener == null) return;
+        if (s == null || s.striker == null) { invalidateCache(); return; }
 
-        List<ShotCandidate> shots = computeBestShots(s);
-        if (shots.isEmpty()) return;
+        float sx = s.striker.pos.x, sy = s.striker.pos.y;
 
-        ShotCandidate best = shots.get(0);
+        // Skip rebuild if striker hasn't moved enough
+        if (!Float.isNaN(cacheStrikerX)) {
+            float dx = sx - cacheStrikerX, dy = sy - cacheStrikerY;
+            if (dx*dx + dy*dy < CACHE_THRESH_PX * CACHE_THRESH_PX) return;
+        }
 
-        // Swipe from striker centre toward the ghost contact point.
-        // We overshoot slightly (factor 1.15) so the striker reaches the coin.
-        float dx   = best.ghostPos.x - s.striker.pos.x;
-        float dy   = best.ghostPos.y - s.striker.pos.y;
-        float dist = (float) Math.sqrt(dx * dx + dy * dy);
-        if (dist < 1f) return;
+        cacheStrikerX = sx;
+        cacheStrikerY = sy;
 
-        float factor  = 1.15f;
-        float toX     = s.striker.pos.x + dx * factor;
-        float toY     = s.striker.pos.y + dy * factor;
-        int   duration = 80; // ms — fast swipe like a real player
+        // Rebuild shot list
+        cachedShots = computeFilteredShots(s);
 
-        lastBestShot = new BestShot(s.striker.pos.x, s.striker.pos.y, toX, toY);
+        // Rebuild trajectory — skip the striker body (kind == 0).
+        // We only want coin paths so lines originate at the coin hit point.
+        cachedTrajectories = new ArrayList<>();
+        int limit = Math.min(3, cachedShots.size());
+        for (int rank = 0; rank < limit; rank++) {
+            CarromAI.AiShot shot = cachedShots.get(rank);
+            List<TrajectorySimulator.PathSegment> all = simulator.simulate(
+                s.striker, shot.ghostPos, s.coins, s.pockets, s.board, 1.0f);
+
+            List<TrajectorySimulator.PathSegment> coinOnly = new ArrayList<>();
+            for (TrajectorySimulator.PathSegment seg : all) {
+                if (seg.kind == 0) continue;          // skip striker's own path
+                if (seg.wallBounces > MAX_BOUNCES) continue; // cap bounces
+                coinOnly.add(seg);
+            }
+            cachedTrajectories.add(coinOnly);
+        }
+
+        // Update best-shot for autoplay
+        if (!cachedShots.isEmpty()) {
+            CarromAI.AiShot best = cachedShots.get(0);
+            float dx = best.ghostPos.x - sx;
+            float dy = best.ghostPos.y - sy;
+            float factor = 1.20f;
+            lastBestShot = new BestShot(sx, sy,
+                sx + dx * factor, sy + dy * factor, best.powerFrac);
+        } else {
+            lastBestShot = null;
+        }
+    }
+
+    public void performBestSwipe() {
+        if (!hasLiveData) return;
+        BestShot bs = lastBestShot;
+        if (bs == null || autoplaySwipeListener == null) return;
         autoplaySwipeListener.onPerformSwipe(
-            s.striker.pos.x, s.striker.pos.y, toX, toY, duration);
+            bs.strikerX, bs.strikerY, bs.targetX, bs.targetY,
+            70, bs.powerFrac);
+    }
+
+    // ── Shot computation ──────────────────────────────────────────────────────
+
+    private List<CarromAI.AiShot> computeFilteredShots(GameState s) {
+        List<CarromAI.AiShot> all = CarromAI.findBestShots(s, MAX_LINES * 3);
+        List<CarromAI.AiShot> out = new ArrayList<>();
+        for (CarromAI.AiShot shot : all) {
+            if (modeAllows(shot.wallsNeeded, shot.isBank)) {
+                out.add(shot);
+                if (out.size() >= MAX_LINES) break;
+            }
+        }
+        return out;
+    }
+
+    private boolean modeAllows(int walls, boolean isBank) {
+        switch (shotMode) {
+            case MODE_DIRECT: return walls == 0 && !isBank;
+            case MODE_AI:     return walls == 0;
+            case MODE_GOLDEN: return walls <= 1;
+            case MODE_LUCKY:  return walls <= 2;
+            default:          return true;
+        }
     }
 
     // ── EMA smoothing ─────────────────────────────────────────────────────────
@@ -306,19 +274,14 @@ public class AimOverlayView extends View {
         if (smoothed == null) { smoothed = raw; return; }
         GameState out = new GameState();
         out.board = smoothRect(smoothed.board, raw.board);
-
         if (raw.striker != null) {
-            if (smoothed.striker != null) {
-                out.striker = new Coin(
-                    ema(smoothed.striker.pos.x, raw.striker.pos.x),
-                    ema(smoothed.striker.pos.y, raw.striker.pos.y),
-                    ema(smoothed.striker.radius, raw.striker.radius),
-                    Coin.COLOR_STRIKER, true);
-            } else {
-                out.striker = raw.striker;
-            }
+            out.striker = (smoothed.striker != null)
+                ? new Coin(ema(smoothed.striker.pos.x, raw.striker.pos.x),
+                           ema(smoothed.striker.pos.y, raw.striker.pos.y),
+                           ema(smoothed.striker.radius, raw.striker.radius),
+                           Coin.COLOR_STRIKER, true)
+                : raw.striker;
         }
-
         out.coins   = smoothCoins(smoothed.coins, raw.coins);
         out.pockets = raw.pockets.isEmpty() ? smoothed.pockets : raw.pockets;
         smoothed = out;
@@ -327,37 +290,25 @@ public class AimOverlayView extends View {
     private List<Coin> smoothCoins(List<Coin> prev, List<Coin> next) {
         if (prev == null || prev.isEmpty()) return next;
         if (next == null || next.isEmpty()) return new ArrayList<>();
-
         List<Coin> result  = new ArrayList<>(next.size());
         boolean[]  matched = new boolean[prev.size()];
-
         for (Coin n : next) {
-            Coin  bestPrev = null;
-            float bestDist = Float.MAX_VALUE;
-            int   bestIdx  = -1;
-
+            Coin bestPrev = null; float bestD = Float.MAX_VALUE; int bi = -1;
             for (int i = 0; i < prev.size(); i++) {
                 if (matched[i]) continue;
                 Coin p = prev.get(i);
                 if (p.color != n.color) continue;
-                float dx = p.pos.x - n.pos.x, dy = p.pos.y - n.pos.y;
-                float d  = (float) Math.sqrt(dx*dx + dy*dy);
-                float threshold = (p.radius + n.radius) * 2.0f;
-                if (d < bestDist && d < threshold) {
-                    bestDist = d; bestPrev = p; bestIdx = i;
-                }
+                float dx = p.pos.x-n.pos.x, dy = p.pos.y-n.pos.y;
+                float d  = (float) Math.sqrt(dx*dx+dy*dy);
+                if (d < bestD && d < (p.radius+n.radius)*2f) { bestD=d; bestPrev=p; bi=i; }
             }
-
             if (bestPrev != null) {
-                matched[bestIdx] = true;
-                result.add(new Coin(
-                    ema(bestPrev.pos.x, n.pos.x),
-                    ema(bestPrev.pos.y, n.pos.y),
-                    ema(bestPrev.radius, n.radius),
-                    n.color, n.isStriker));
-            } else {
-                result.add(n);
-            }
+                matched[bi] = true;
+                result.add(new Coin(ema(bestPrev.pos.x, n.pos.x),
+                                    ema(bestPrev.pos.y, n.pos.y),
+                                    ema(bestPrev.radius, n.radius),
+                                    n.color, n.isStriker));
+            } else { result.add(n); }
         }
         return result;
     }
@@ -367,26 +318,7 @@ public class AimOverlayView extends View {
         return new RectF(ema(p.left,n.left), ema(p.top,n.top),
                          ema(p.right,n.right), ema(p.bottom,n.bottom));
     }
-
-    private float ema(float p, float n) { return p + EMA_ALPHA * (n - p); }
-
-    // ── Per-coin color paints ─────────────────────────────────────────────────
-
-    private Paint coinLinePaint(int coinColor) {
-        switch (coinColor) {
-            case Coin.COLOR_RED:    return redLinePaint;
-            case Coin.COLOR_BLACK:  return blackLinePaint;
-            default:                return yellowLinePaint;
-        }
-    }
-
-    private Paint coinDotPaint(int coinColor) {
-        switch (coinColor) {
-            case Coin.COLOR_RED:    return redDotPaint;
-            case Coin.COLOR_BLACK:  return blackDotPaint;
-            default:                return yellowDotPaint;
-        }
-    }
+    private float ema(float p, float n) { return p + EMA_ALPHA*(n-p); }
 
     // ── Draw ──────────────────────────────────────────────────────────────────
 
@@ -396,210 +328,173 @@ public class AimOverlayView extends View {
         GameState s = smoothed != null ? smoothed : detected;
         if (s == null || s.striker == null) return;
 
-        // Board outline
-        if (s.board != null) {
-            canvas.drawRect(s.board, boardPaint);
+        RectF board = s.board;
+
+        if (board != null) {
+            canvas.drawRect(board, hasLiveData ? boardPaint : boardDemoPaint);
             canvas.drawText("created by abraham / Xhay",
-                    s.board.centerX(), s.board.centerY(), watermarkPaint);
+                    board.centerX(), board.centerY(), watermarkPaint);
         }
 
-        // Pockets
         for (PointF p : s.pockets)
-            canvas.drawCircle(p.x, p.y, 13 * dp, pocketFill);
+            canvas.drawCircle(p.x, p.y, 13*dp, pocketFill);
 
-        if (!s.pockets.isEmpty()) {
+        // Use cached results — no physics recomputation every frame
+        List<CarromAI.AiShot> shots = cachedShots;
 
-            // ── Draw every coin's line to its nearest pocket ──────────────────
-            for (Coin c : s.coins) {
-                if (c.color == Coin.COLOR_STRIKER) continue;
-                PointF nearestPocket = nearestPocket(c.pos, s.pockets);
-                if (nearestPocket == null) continue;
+        // Draw shots back-to-front (rank-1 ends up on top)
+        for (int rank = shots.size()-1; rank >= 0; rank--) {
+            CarromAI.AiShot shot = shots.get(rank);
+            Paint aimP    = aimPaints[rank];
+            Paint bounceP = bouncePaints[rank];
+            Paint coinP   = coinPathPaints[rank];
 
-                Paint linePaint = coinLinePaint(c.color);
-                Paint dotPaint  = coinDotPaint(c.color);
+            // ── Striker → ghost aim line (clipped to board) ──────────────────
+            drawLineSafe(canvas,
+                s.striker.pos.x, s.striker.pos.y,
+                shot.ghostPos.x,  shot.ghostPos.y,
+                aimP, board);
 
-                // Line from coin → pocket
-                canvas.drawLine(c.pos.x, c.pos.y,
-                        nearestPocket.x, nearestPocket.y, linePaint);
+            // Ghost-ball circle at coin contact point
+            canvas.drawCircle(shot.ghostPos.x, shot.ghostPos.y,
+                              s.striker.radius, rank == 0 ? coinOutlinePaint : ghostPaint);
 
-                // Dot at coin end (filled circle)
-                canvas.drawCircle(c.pos.x, c.pos.y, 6 * dp, dotPaint);
+            // ── Coin → pocket path (clipped to board) ────────────────────────
+            if (shot.coin != null && shot.pocket != null)
+                drawLineSafe(canvas,
+                    shot.coin.pos.x, shot.coin.pos.y,
+                    shot.pocket.x,   shot.pocket.y,
+                    coinP, board);
 
-                // Small circle at pocket end
-                canvas.drawCircle(nearestPocket.x, nearestPocket.y, 8 * dp, dotPaint);
-            }
-
-            // ── Striker aim line to best shot ─────────────────────────────────
-            List<ShotCandidate> shots = computeBestShots(s);
-            if (!shots.isEmpty()) {
-                ShotCandidate best = shots.get(0);
-
-                // White aim line: striker → ghost contact point
-                canvas.drawLine(s.striker.pos.x, s.striker.pos.y,
-                        best.ghostPos.x, best.ghostPos.y, strikerLinePaint);
-
-                // Ghost ball circle at contact
-                canvas.drawCircle(best.ghostPos.x, best.ghostPos.y,
-                        s.striker.radius, coinOutlinePaint);
-
-                // Coin → pocket direction for best shot (cyan)
-                if (best.coin != null && best.pocket != null) {
-                    canvas.drawLine(best.coin.pos.x, best.coin.pos.y,
-                            best.pocket.x, best.pocket.y, cyanLinePaint);
-                }
-
-                // Orange arrow at striker showing aim direction
-                drawArrow(canvas, s.striker.pos, best.ghostPos);
-
-                // Post-contact trajectory (up to 3 segments)
-                List<TrajectorySimulator.PathSegment> segs = simulator.simulate(
-                        s.striker, best.ghostPos, s.coins, s.pockets, s.board, 1.0f);
-                int segDrawn = 0;
+            // ── Coin-body trajectory segments (cached, no striker path) ──────
+            if (rank < cachedTrajectories.size()) {
+                List<TrajectorySimulator.PathSegment> segs = cachedTrajectories.get(rank);
+                int bounceCount = 0;
                 for (TrajectorySimulator.PathSegment seg : segs) {
-                    if (segDrawn >= 3) break;
-                    drawPolyline(canvas, seg.points,
-                            seg.wallBounces == 0 ? strikerLinePaint : bouncePaints[0]);
-                    segDrawn++;
+                    if (bounceCount >= MAX_BOUNCES) break;
+                    // Fade each bounce: alpha decreases by 55 per bounce
+                    int alpha = Math.max(30, LINE_ALPHAS[rank] - bounceCount * 55);
+                    Paint segPaint = seg.wallBounces > 0 ? bounceP : aimP;
+                    segPaint.setAlpha(alpha);
+                    drawPolylineClipped(canvas, seg.points, segPaint, board);
+                    segPaint.setAlpha(LINE_ALPHAS[rank]); // restore
+                    bounceCount++;
                 }
             }
         }
 
-        // ── Draw coins on top of lines ────────────────────────────────────────
+        // Orange aim arrow on best shot
+        if (!shots.isEmpty())
+            drawArrow(canvas, s.striker.pos, shots.get(0).ghostPos);
+
+        // Coins
         for (Coin c : s.coins) {
             Paint f = c.color == Coin.COLOR_BLACK ? blackFill
                     : c.color == Coin.COLOR_RED   ? redFill : whiteFill;
             canvas.drawCircle(c.pos.x, c.pos.y, c.radius, f);
             canvas.drawCircle(c.pos.x, c.pos.y, c.radius, coinOutlinePaint);
         }
-
-        // Striker
+        // Striker drawn last — always on top
         canvas.drawCircle(s.striker.pos.x, s.striker.pos.y, s.striker.radius, whiteFill);
         canvas.drawCircle(s.striker.pos.x, s.striker.pos.y, s.striker.radius, strikerPaint);
     }
 
-    private PointF nearestPocket(PointF pos, List<PointF> pockets) {
-        PointF best = null; float bestD = Float.MAX_VALUE;
-        for (PointF p : pockets) {
-            float d = dist(pos, p);
-            if (d < bestD) { bestD = d; best = p; }
+    // ── Draw helpers ──────────────────────────────────────────────────────────
+
+    /** Draw a single line, clipped to the board rect if board is non-null. */
+    private void drawLineSafe(Canvas canvas,
+                               float x0, float y0, float x1, float y1,
+                               Paint p, RectF board) {
+        if (!isFinite(x0, y0, x1, y1)) return;
+        if (board != null) {
+            float[] c = clipLineToRect(x0, y0, x1, y1, board);
+            if (c != null) canvas.drawLine(c[0], c[1], c[2], c[3], p);
+        } else {
+            canvas.drawLine(x0, y0, x1, y1, p);
         }
-        return best;
+    }
+
+    /** Draw a polyline, clipping every segment to the board rect. */
+    private void drawPolylineClipped(Canvas canvas, List<PointF> pts, Paint p, RectF board) {
+        for (int i = 1; i < pts.size(); i++) {
+            float x0 = pts.get(i-1).x, y0 = pts.get(i-1).y;
+            float x1 = pts.get(i).x,   y1 = pts.get(i).y;
+            drawLineSafe(canvas, x0, y0, x1, y1, p, board);
+        }
+    }
+
+    /**
+     * Cohen-Sutherland line clipping against a rectangle.
+     * Returns {x0, y0, x1, y1} of the visible segment, or null if fully outside.
+     */
+    private static float[] clipLineToRect(float x0, float y0, float x1, float y1, RectF r) {
+        int code0 = outcode(x0, y0, r);
+        int code1 = outcode(x1, y1, r);
+
+        while (true) {
+            if ((code0 | code1) == 0) return new float[]{x0, y0, x1, y1}; // both inside
+            if ((code0 & code1) != 0) return null; // trivially outside
+
+            int codeOut = (code0 != 0) ? code0 : code1;
+            float x, y;
+
+            if ((codeOut & 8) != 0) {         // above (y < top)
+                x = x0 + (x1-x0) * (r.top - y0) / (y1-y0); y = r.top;
+            } else if ((codeOut & 4) != 0) {  // below (y > bottom)
+                x = x0 + (x1-x0) * (r.bottom - y0) / (y1-y0); y = r.bottom;
+            } else if ((codeOut & 2) != 0) {  // right
+                y = y0 + (y1-y0) * (r.right - x0) / (x1-x0); x = r.right;
+            } else {                           // left
+                y = y0 + (y1-y0) * (r.left - x0) / (x1-x0); x = r.left;
+            }
+
+            if (codeOut == code0) { x0 = x; y0 = y; code0 = outcode(x0, y0, r); }
+            else                  { x1 = x; y1 = y; code1 = outcode(x1, y1, r); }
+        }
+    }
+
+    private static int outcode(float x, float y, RectF r) {
+        int c = 0;
+        if (x < r.left)   c |= 1;
+        if (x > r.right)  c |= 2;
+        if (y > r.bottom) c |= 4;
+        if (y < r.top)    c |= 8;
+        return c;
     }
 
     private void drawArrow(Canvas canvas, PointF from, PointF to) {
-        float dx = to.x - from.x, dy = to.y - from.y;
-        float len = (float) Math.sqrt(dx*dx + dy*dy);
+        float dx = to.x-from.x, dy = to.y-from.y;
+        float len = (float) Math.sqrt(dx*dx+dy*dy);
         if (len < 1f) return;
-        float ux = dx / len, uy = dy / len;
-
-        // Arrow tip at striker center offset toward target
-        float tipX = from.x + ux * 20 * dp;
-        float tipY = from.y + uy * 20 * dp;
-
-        float arrowLen = 14 * dp;
-        float arrowW   = 7  * dp;
-
+        float ux = dx/len, uy = dy/len;
+        float tipX = from.x + ux*22*dp, tipY = from.y + uy*22*dp;
+        float al = 14*dp, aw = 7*dp;
         Path path = new Path();
         path.moveTo(tipX, tipY);
-        path.lineTo(tipX - ux * arrowLen + uy * arrowW,
-                    tipY - uy * arrowLen - ux * arrowW);
-        path.lineTo(tipX - ux * arrowLen - uy * arrowW,
-                    tipY - uy * arrowLen + ux * arrowW);
+        path.lineTo(tipX - ux*al + uy*aw, tipY - uy*al - ux*aw);
+        path.lineTo(tipX - ux*al - uy*aw, tipY - uy*al + ux*aw);
         path.close();
         canvas.drawPath(path, arrowPaint);
     }
 
-    // ── Shot candidates ───────────────────────────────────────────────────────
-
-    private static class ShotCandidate {
-        final PointF ghostPos;
-        final Coin   coin;
-        final PointF pocket;
-        final float  score;
-        final int    wallsNeeded;
-        ShotCandidate(PointF g, Coin c, PointF pk, float sc, int walls) {
-            ghostPos = g; coin = c; pocket = pk; score = sc; wallsNeeded = walls;
-        }
+    private static boolean isFinite(float... v) {
+        for (float f : v) if (Float.isNaN(f)||Float.isInfinite(f)) return false;
+        return true;
     }
 
-    private List<ShotCandidate> computeBestShots(GameState s) {
-        List<ShotCandidate> list = new ArrayList<>();
-        if (s.pockets.isEmpty()) return list;
+    // ── Paint helpers ─────────────────────────────────────────────────────────
 
-        for (Coin coin : s.coins) {
-            if (coin.color == Coin.COLOR_STRIKER) continue;
-
-            PointF bestPocket = null;
-            float  bestDist   = Float.MAX_VALUE;
-            for (PointF pk : s.pockets) {
-                float d = dist(coin.pos, pk);
-                if (d < bestDist) { bestDist = d; bestPocket = pk; }
-            }
-            if (bestPocket == null) continue;
-
-            float dx  = coin.pos.x - bestPocket.x;
-            float dy  = coin.pos.y - bestPocket.y;
-            float len = (float) Math.sqrt(dx*dx + dy*dy);
-            if (len < 1f) continue;
-            float  ghostR = s.striker.radius + coin.radius;
-            PointF ghost  = new PointF(
-                    coin.pos.x + (dx / len) * ghostR,
-                    coin.pos.y + (dy / len) * ghostR);
-
-            if (s.board != null) {
-                float margin = s.striker.radius;
-                RectF expanded = new RectF(
-                    s.board.left - margin, s.board.top    - margin,
-                    s.board.right+ margin, s.board.bottom + margin);
-                if (!expanded.contains(ghost.x, ghost.y)) continue;
-            }
-
-            int wallsNeeded = 0;
-            if (s.board != null) {
-                float strikerToCoinDist = dist(s.striker.pos, ghost);
-                float boardDiag = (float) Math.sqrt(
-                    s.board.width()*s.board.width() + s.board.height()*s.board.height());
-                if (strikerToCoinDist > boardDiag * 0.7f) wallsNeeded = 1;
-            }
-
-            if (!shotModeAllows(wallsNeeded)) continue;
-
-            float score = 800f / (dist(s.striker.pos, ghost) + 1f)
-                        + 400f / (bestDist + 1f);
-            if (coin.color == Coin.COLOR_RED) score *= 1.4f;
-
-            list.add(new ShotCandidate(ghost, coin, bestPocket, score, wallsNeeded));
-        }
-
-        Collections.sort(list, (a, b) -> Float.compare(b.score, a.score));
-        return list;
+    private Paint stroke(int color, float w) {
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        p.setColor(color); p.setStyle(Paint.Style.STROKE);
+        p.setStrokeWidth(w*dp); p.setStrokeCap(Paint.Cap.ROUND);
+        p.setStrokeJoin(Paint.Join.ROUND); return p;
     }
-
-    private boolean shotModeAllows(int wallsNeeded) {
-        switch (shotMode) {
-            case MODE_DIRECT: return wallsNeeded == 0;
-            case MODE_GOLDEN: return wallsNeeded <= 1;
-            case MODE_LUCKY:  return wallsNeeded <= 2;
-            case MODE_AI:
-            case MODE_ALL:
-            default:          return true;
-        }
+    private Paint strokeA(int color, float w, int alpha) {
+        Paint p = stroke(color, w); p.setAlpha(alpha); return p;
     }
-
-    // ── Drawing helpers ───────────────────────────────────────────────────────
-
-    private void drawPolyline(Canvas c, List<PointF> pts, Paint p) {
-        for (int i = 1; i < pts.size(); i++) {
-            float x0 = pts.get(i-1).x, y0 = pts.get(i-1).y;
-            float x1 = pts.get(i).x,   y1 = pts.get(i).y;
-            if (Float.isNaN(x0)||Float.isNaN(y0)||Float.isNaN(x1)||Float.isNaN(y1)) continue;
-            if (Float.isInfinite(x0)||Float.isInfinite(y0)||Float.isInfinite(x1)||Float.isInfinite(y1)) continue;
-            c.drawLine(x0, y0, x1, y1, p);
-        }
-    }
-
-    private float dist(PointF a, PointF b) {
-        float dx = a.x - b.x, dy = a.y - b.y;
-        return (float) Math.sqrt(dx * dx + dy * dy);
+    private Paint fill(int color) {
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        p.setColor(color); p.setStyle(Paint.Style.FILL); return p;
     }
 }

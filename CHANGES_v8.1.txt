@@ -1,0 +1,71 @@
+AIMxASSIST v8.1 — Trajectory Fix + Autoplay Fix + Smooth UI
+=============================================================
+
+BUGS FIXED
+──────────
+
+1. Lines drawn ON the striker  [AimOverlayView.java]
+   ROOT CAUSE: TrajectorySimulator returns one path-segment per body.
+   The first segment was the striker's own movement (kind == 0), which
+   starts at the striker centre — making it look like lines grow out of
+   the striker disk.
+
+   FIX: In the draw loop we now skip any segment whose kind == 0.
+   Only COIN body segments (kind 1/2/3) are drawn, so trajectory lines
+   originate at the coin hit point (ghost-ball contact), not the striker.
+
+2. Lines going outside the board  [AimOverlayView.java]
+   ROOT CAUSE: The straight aim lines (striker→ghost, coin→pocket) were
+   drawn with raw canvas.drawLine() using screen-space coordinates that
+   could lie outside the board RectF (e.g. reflected ghost positions for
+   bank shots).
+
+   FIX: All line drawing now goes through drawLineSafe() which runs
+   Cohen-Sutherland clipping against the detected board rectangle before
+   calling drawLine. Nothing is ever rendered outside the board boundary.
+
+3. Lines keep animating / recalculating every frame  [AimOverlayView.java]
+   ROOT CAUSE: onDraw() called computeFilteredShots() and
+   simulator.simulate() on every invalidation (~30 fps), so the full
+   physics simulation ran 30× per second regardless of board state.
+
+   FIX: Results are now CACHED in cachedShots / cachedTrajectories.
+   rebuildCacheIfNeeded() only recomputes when the striker has moved
+   more than CACHE_THRESH_PX (4 px) since the last build.
+   onDraw() reads the cache — zero physics cost while the board is still.
+
+4. AutoPlay not firing reliably  [FloatingOverlayService.java]
+   ROOT CAUSE: STABLE_THRESH_PX was 10 px. Normal CV detection jitter
+   (1–15 px per frame) was enough to reset stableFrames every frame,
+   so the counter never reached STABLE_FRAMES_NEEDED (10) and the shot
+   never fired.
+
+   FIX: STABLE_THRESH_PX raised from 10 → 20 px.
+   Small CV noise is now ignored; only genuine striker movement resets
+   the stability counter. No other autoplay logic changed.
+
+5. Floating icon not smooth  [FloatingOverlayService.java]
+   ROOT CAUSE: On ACTION_UP the button stayed wherever the finger
+   released it — no edge-snapping, no animation.
+
+   FIX: snapToEdge() is called on drag release. It animates the button
+   to the nearest screen edge (left or right) over 250 ms using
+   DecelerateInterpolator(1.8) for a spring-like feel. The popup also
+   now fades in (180 ms) and fades out (150 ms) instead of appearing
+   and disappearing instantly.
+
+UNCHANGED
+─────────
+• TrajectorySimulator.java  — physics simulation unchanged
+• CarromAI.java             — AI geometry unchanged
+• AutoShootService.java     — gesture injection unchanged
+• OverlayModule.java        — React Native bridge unchanged
+• BoardDetector.java        — CV detector unchanged
+• ScreenCaptureService.java — screen capture unchanged
+
+HOW TO REBUILD
+──────────────
+  cd carrom-fixed
+  npm install          # or: yarn
+  npx react-native run-android
+  # or build release APK via GitHub Actions (see .github/workflows/build-apk.yml)

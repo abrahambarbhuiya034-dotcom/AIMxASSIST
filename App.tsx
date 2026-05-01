@@ -1,14 +1,15 @@
 /**
- * AIMxASSIST — v4.0
+ * AIMxASSIST — v8.1
  * Main React Native UI
  *
- * NEW in v4:
- *  - AutoPlay toggle: fires the best shot automatically, no user touch needed.
- *    Backed by AutoShootService (AccessibilityService + GestureDescription).
- *  - Delay Between Shots slider (0.5 s – 5 s).
- *  - "Shoot Now" button: single manual trigger without enabling full autoplay.
- *  - 5 coloured prediction lines (Gold → Cyan → Orange → Purple → Green).
- *  - Accessibility readiness check with deep-link banner.
+ * v8.1 changes:
+ *  - Trajectory lines start at the COIN HIT POINT, not the striker centre
+ *  - All lines clipped to board boundary — nothing drawn outside the board
+ *  - Trajectory cached: recomputed only when striker actually moves (no per-frame recalc)
+ *  - Max 2 wall-bounce segments drawn per shot, each fading out
+ *  - Floating button now smoothly snaps to nearest screen edge on release
+ *  - Autoplay stability threshold raised: less sensitive to CV jitter → fires more reliably
+ *  - Popup fades in/out smoothly
  */
 
 import React, {useState, useEffect, useCallback} from 'react';
@@ -30,12 +31,6 @@ import Slider from '@react-native-community/slider';
 const {OverlayModule} = NativeModules;
 
 type ShotMode = 'ALL' | 'DIRECT' | 'AI' | 'GOLDEN' | 'LUCKY';
-
-interface MarginSettings {
-  d2X: number; d2Y: number;
-  e2X: number; e2Y: number;
-  insideX: number; insideY: number;
-}
 
 const SHOT_MODES: {mode: ShotMode; label: string; desc: string}[] = [
   {mode: 'ALL',    label: 'All Lines', desc: 'Show every prediction simultaneously'},
@@ -61,16 +56,9 @@ export default function App() {
   const [sensitivity, setSensitivity]         = useState(1.0);
   const [detectThreshold, setDetectThreshold] = useState(36);
 
-  // AutoPlay state
   const [autoPlay, setAutoPlayState]          = useState(false);
   const [autoPlayDelay, setAutoPlayDelay]     = useState(2.0);
   const [accessibilityReady, setAccessibilityReady] = useState(false);
-
-  const [margin, setMargin] = useState<MarginSettings>({
-    d2X: 0, d2Y: 0, e2X: 0, e2Y: 0, insideX: 0, insideY: 0,
-  });
-  const [activeMarginTab, setActiveMarginTab] =
-    useState<'D2' | 'E2' | 'INSIDE'>('D2');
 
   useEffect(() => {
     refreshStatus();
@@ -89,13 +77,11 @@ export default function App() {
       setAutoDetect(active);
     } catch {}
 
-    // Check AccessibilityService (AutoShootService) is connected
     try {
       const ready = await OverlayModule.isAccessibilityReady();
       setAccessibilityReady(ready);
     } catch { setAccessibilityReady(false); }
 
-    // Sync autoPlay state
     try {
       const ap = await OverlayModule.isAutoPlayEnabled();
       setAutoPlayState(ap);
@@ -117,7 +103,6 @@ export default function App() {
     if (!hasOverlay) { requestOverlay(); return; }
     try {
       if (overlayActive) {
-        // Stop autoplay before stopping overlay
         if (autoPlay) {
           try { await OverlayModule.setAutoPlay(false); } catch {}
           setAutoPlayState(false);
@@ -174,6 +159,12 @@ export default function App() {
       const next = !autoPlay;
       await OverlayModule.setAutoPlay(next);
       setAutoPlayState(next);
+      if (next) {
+        Alert.alert(
+          'AutoPlay Enabled',
+          'Now switch to your carrom game. The app fires automatically once it detects a stable board — it will NOT fire while you are on this screen.',
+          [{text: 'Got it'}]);
+      }
     } catch (e: any) {
       if (e.code === 'ERR_NO_ACCESSIBILITY') {
         Alert.alert('Accessibility Not Ready',
@@ -199,7 +190,7 @@ export default function App() {
     try {
       await OverlayModule.shootNow();
     } catch (e: any) {
-      Alert.alert('Shot Failed', e.message || 'Could not fire shot');
+      Alert.alert('Shot Failed', e.message || 'Make sure you are in the carrom game with a stable board');
     }
   }, [overlayActive, autoDetect, accessibilityReady]);
 
@@ -223,28 +214,13 @@ export default function App() {
     try { await OverlayModule.setAutoPlayDelay(Math.round(val * 1000)); } catch {}
   }, []);
 
-  const handleMarginChange = useCallback((axis: 'X' | 'Y', value: number) => {
-    const key = `${activeMarginTab.toLowerCase()}${axis}` as keyof MarginSettings;
-    const updated = {...margin, [key]: value};
-    setMargin(updated);
-    try { OverlayModule.setMarginOffset(updated.d2X, updated.d2Y); } catch {}
-  }, [activeMarginTab, margin]);
-
-  const getActiveMargin = () => {
-    switch (activeMarginTab) {
-      case 'D2':     return {x: margin.d2X, y: margin.d2Y};
-      case 'E2':     return {x: margin.e2X, y: margin.e2Y};
-      case 'INSIDE': return {x: margin.insideX, y: margin.insideY};
-    }
-  };
-
   return (
     <View style={styles.root}>
       <StatusBar barStyle="light-content" backgroundColor="#0D0D1A" />
 
       <View style={styles.header}>
         <Text style={styles.logo}>AIMxASSIST</Text>
-        <Text style={styles.subtitle}>Auto-Detect Carrom Aim Assist • v4.0</Text>
+        <Text style={styles.subtitle}>Auto-Detect Carrom Aim Assist • v8.1</Text>
       </View>
 
       <ScrollView style={styles.scroll}
@@ -282,7 +258,7 @@ export default function App() {
               <Text style={styles.cardSub}>
                 {autoDetect
                   ? 'Reading screen — striker, coins and pockets detected automatically'
-                  : 'Computer vision reads the screen each frame (one-time permission)'}
+                  : 'Pure-Java detector: reads screen pixels in real-time (one-time permission)'}
               </Text>
             </View>
             <Switch value={autoDetect} onValueChange={toggleAutoDetect}
@@ -293,10 +269,11 @@ export default function App() {
 
         {/* AutoPlay */}
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>🤖 AutoPlay</Text>
+          <Text style={styles.cardTitle}>AutoPlay</Text>
           <Text style={styles.cardSub}>
-            Automatically swipes the striker — no touch needed.
-            Requires Overlay + Auto-Detect + Accessibility permission.
+            Automatically swipes the striker. Fires ONLY when the carrom board
+            is stable — never while you are on this screen.
+            Requires Overlay + Auto-Detect + Accessibility.
           </Text>
 
           {!accessibilityReady && (
@@ -314,7 +291,7 @@ export default function App() {
               <Text style={styles.cardTitle}>Auto Shoot</Text>
               <Text style={styles.cardSub}>
                 {autoPlay
-                  ? `Firing every ${autoPlayDelay.toFixed(1)} s — hands off!`
+                  ? 'ACTIVE — switch to carrom game, fires on stable board'
                   : 'Off — tap to start automatic shooting'}
               </Text>
             </View>
@@ -324,7 +301,7 @@ export default function App() {
           </View>
 
           <View style={[styles.rowSpread, {marginTop: 12}]}>
-            <Text style={styles.cardTitle}>Delay Between Shots</Text>
+            <Text style={styles.cardTitle}>Min Delay Between Shots</Text>
             <Text style={styles.valueLabel}>{autoPlayDelay.toFixed(1)} s</Text>
           </View>
           <Slider style={styles.slider}
@@ -350,7 +327,7 @@ export default function App() {
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Prediction Lines</Text>
           <Text style={styles.cardSub}>
-            Up to 5 lines shown at once, each in a unique colour by rank
+            Up to 5 lines — ranked by AI ghost-ball score. Gold = best shot.
           </Text>
           <View style={styles.shotGrid}>
             {SHOT_MODES.map(({mode, label, desc}) => (
@@ -369,9 +346,9 @@ export default function App() {
             {LINE_LEGEND.map(item => (
               <LegendDot key={item.label} color={item.color} label={item.label} />
             ))}
-            <LegendDot color="#00E5FF" label="1-wall bounce" />
-            <LegendDot color="#D946EF" label="2-wall bounce" />
-            <LegendDot color="#22C55E" label="Into pocket" />
+            <LegendDot color="#FFFFFF" label="Striker path" />
+            <LegendDot color="#00E5FF" label="Wall bounce" />
+            <LegendDot color="#22C55E" label="Coin → pocket" />
           </View>
         </View>
 
@@ -409,69 +386,27 @@ export default function App() {
             thumbTintColor="#00E5FF" />
         </View>
 
-        {/* Margin Calibration */}
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Margin Calibration</Text>
-          <Text style={styles.cardSub}>
-            Nudge the touch point if your screen reports a small offset
-          </Text>
-          <View style={styles.tabRow}>
-            {(['D2', 'E2', 'INSIDE'] as const).map(tab => (
-              <TouchableOpacity key={tab}
-                style={[styles.tab, activeMarginTab === tab && styles.tabActive]}
-                onPress={() => setActiveMarginTab(tab)}>
-                <Text style={[styles.tabText,
-                  activeMarginTab === tab && styles.tabTextActive]}>{tab}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          {(['X', 'Y'] as const).map(axis => (
-            <View key={axis} style={styles.marginRow}>
-              <Text style={styles.marginLabel}>
-                {axis} Offset:{' '}
-                <Text style={styles.marginValue}>
-                  {(axis === 'X' ? getActiveMargin().x : getActiveMargin().y).toFixed(1)}
-                </Text>
-              </Text>
-              <Slider style={styles.slider}
-                minimumValue={-30} maximumValue={30} step={0.5}
-                value={axis === 'X' ? getActiveMargin().x : getActiveMargin().y}
-                onValueChange={v => handleMarginChange(axis, v)}
-                minimumTrackTintColor="#00E5FF" maximumTrackTintColor="#333"
-                thumbTintColor="#00E5FF" />
-            </View>
-          ))}
-          <TouchableOpacity style={styles.resetBtn}
-            onPress={() => {
-              const r: MarginSettings = {d2X:0,d2Y:0,e2X:0,e2Y:0,insideX:0,insideY:0};
-              setMargin(r);
-              try { OverlayModule.setMarginOffset(0, 0); } catch {}
-            }}>
-            <Text style={styles.resetBtnText}>Reset Margins</Text>
-          </TouchableOpacity>
-        </View>
-
         {/* How To Use */}
         <View style={styles.card}>
           <Text style={styles.cardTitle}>How to Use</Text>
           <Text style={styles.howToStep}>1. Grant "Draw over apps" permission above</Text>
           <Text style={styles.howToStep}>2. Turn on the Aim Overlay</Text>
           <Text style={styles.howToStep}>3. Enable Auto-Detect (one-time screen capture permission)</Text>
-          <Text style={styles.howToStep}>4. Open Carrom Pool — tap the floating icon → Turn ON</Text>
-          <Text style={styles.howToStep}>5. Up to 5 coloured aim lines appear automatically</Text>
+          <Text style={styles.howToStep}>4. Open Carrom Pool — lines appear automatically</Text>
+          <Text style={styles.howToStep}>5. Gold line = best shot. Cyan = 2nd best, etc.</Text>
           <Text style={styles.howToStep}>6. For AutoPlay: enable "AIMxASSIST" in Android</Text>
-          <Text style={styles.howToStep}>   Accessibility Settings, then flip Auto Shoot ON</Text>
-          <Text style={styles.howToStep}>7. The app swipes the striker by itself — no touch needed</Text>
+          <Text style={styles.howToStep}>   Accessibility Settings, flip Auto Shoot ON, then</Text>
+          <Text style={styles.howToStep}>   switch to your carrom game — it fires by itself</Text>
           <Text style={styles.howToTip}>
-            Tip: use "Shoot Best Shot Now" for a single manual trigger without
-            turning on full autoplay. Watermark "created by abraham / Xhay"
-            appears at board centre.
+            AutoPlay waits for a stable board before firing — it will never
+            activate while you are on this app. Use "Shoot Best Shot Now"
+            for a single manual trigger anytime.
           </Text>
         </View>
 
         <View style={styles.footer}>
           <Text style={styles.footerText}>
-            AIMxASSIST v4.0 • AutoPlay + 5-Line Prediction • Android 7+
+            AIMxASSIST v8.1 • Ghost-Ball AI • Stable AutoPlay • Android 7+
           </Text>
         </View>
       </ScrollView>
@@ -529,24 +464,6 @@ const styles = StyleSheet.create({
   slider:         {width: '100%', height: 36},
   sliderEndLabel: {color: '#666688', fontSize: 11},
   valueLabel:     {color: '#FFD700', fontSize: 16, fontWeight: '700'},
-  tabRow:         {flexDirection: 'row', gap: 8, marginVertical: 10},
-  tab:            {
-    flex: 1, paddingVertical: 8, borderRadius: 8,
-    backgroundColor: '#1E1E3A', alignItems: 'center',
-    borderWidth: 1, borderColor: '#333355',
-  },
-  tabActive:      {backgroundColor: '#00293A', borderColor: '#00E5FF'},
-  tabText:        {color: '#8888BB', fontSize: 13, fontWeight: '600'},
-  tabTextActive:  {color: '#00E5FF'},
-  marginRow:      {marginBottom: 8},
-  marginLabel:    {color: '#AAA', fontSize: 13, marginBottom: 2},
-  marginValue:    {color: '#00E5FF', fontWeight: '700'},
-  resetBtn:       {
-    marginTop: 6, paddingVertical: 8, borderRadius: 8,
-    backgroundColor: '#1E1E3A', alignItems: 'center',
-    borderWidth: 1, borderColor: '#444466',
-  },
-  resetBtnText:   {color: '#FF7777', fontSize: 13, fontWeight: '600'},
   shootNowBtn:    {
     marginTop: 12, paddingVertical: 12, borderRadius: 10,
     backgroundColor: '#0A2A10', alignItems: 'center',
