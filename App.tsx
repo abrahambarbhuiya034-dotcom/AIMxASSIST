@@ -1,10 +1,11 @@
 /**
  * AIMxASSIST - Carrom Pool Aim Assistant
- * Main React Native UI — v3.0
+ * Main React Native UI — v5.0 (AutoPlay edition)
  *
  * - Fully automatic aim lines, no touch needed
- * - Board auto-detected via wood-colour CV (no manual margin needed)
- * - Max 5 prediction lines, EMA-smoothed for stability
+ * - Board auto-detected via wood-colour CV
+ * - Wall-bounce + 2-cushion indirect prediction lines
+ * - AutoPlay: auto-shoots striker via Accessibility Service (no root!)
  * - Watermark: created by abraham / Xhay
  */
 
@@ -26,7 +27,6 @@ import Slider from '@react-native-community/slider';
 
 const {OverlayModule} = NativeModules;
 
-// ─── Types ───────────────────────────────────────────────────────────────────
 type ShotMode = 'ALL' | 'DIRECT' | 'AI' | 'GOLDEN' | 'LUCKY';
 
 interface MarginSettings {
@@ -38,17 +38,19 @@ interface MarginSettings {
 const SHOT_MODES: {mode: ShotMode; label: string; desc: string}[] = [
   {mode: 'ALL',    label: 'All Lines', desc: 'Show every prediction simultaneously'},
   {mode: 'DIRECT', label: 'Direct',    desc: 'Striker straight line only'},
-  {mode: 'AI',     label: 'AI Aim',    desc: 'Striker + coin chain reactions'},
-  {mode: 'GOLDEN', label: 'Golden',    desc: 'Up to one cushion bounce'},
-  {mode: 'LUCKY',  label: 'Lucky',     desc: 'Up to two cushion bounces'},
+  {mode: 'AI',     label: 'AI Aim',    desc: 'Direct + 1-cushion bounce shots'},
+  {mode: 'GOLDEN', label: 'Golden',    desc: '1-cushion wall bounce only'},
+  {mode: 'LUCKY',  label: 'Lucky',     desc: 'Up to 2-cushion bounces'},
 ];
 
 export default function App() {
-  const [hasOverlay, setHasOverlay]   = useState(false);
-  const [overlayActive, setOverlayActive] = useState(false);
-  const [autoDetect, setAutoDetect]   = useState(false);
-  const [selectedMode, setSelectedMode] = useState<ShotMode>('ALL');
-  const [sensitivity, setSensitivity] = useState(1.0);
+  const [hasOverlay, setHasOverlay]         = useState(false);
+  const [overlayActive, setOverlayActive]   = useState(false);
+  const [autoDetect, setAutoDetect]         = useState(false);
+  const [autoPlay, setAutoPlay]             = useState(false);
+  const [accessibilityReady, setAccessibilityReady] = useState(false);
+  const [selectedMode, setSelectedMode]     = useState<ShotMode>('ALL');
+  const [sensitivity, setSensitivity]       = useState(1.0);
   const [detectThreshold, setDetectThreshold] = useState(36);
   const [margin, setMargin] = useState<MarginSettings>({
     d2X: 0, d2Y: 0, e2X: 0, e2Y: 0, insideX: 0, insideY: 0,
@@ -70,6 +72,14 @@ export default function App() {
     try {
       const active = await OverlayModule.isAutoDetectActive();
       setAutoDetect(active);
+    } catch {}
+    try {
+      const ready = await OverlayModule.isAccessibilityReady();
+      setAccessibilityReady(ready);
+    } catch {}
+    try {
+      const ap = await OverlayModule.isAutoPlayEnabled();
+      setAutoPlay(ap);
     } catch {}
   }, []);
 
@@ -93,6 +103,7 @@ export default function App() {
         await OverlayModule.stopOverlay();
         setOverlayActive(false);
         setAutoDetect(false);
+        setAutoPlay(false);
       } else {
         await OverlayModule.startOverlay();
         setOverlayActive(true);
@@ -114,13 +125,47 @@ export default function App() {
         setAutoDetect(false);
       } else {
         await OverlayModule.requestScreenCapture();
-        // System dialog appears; status updates on next poll
         setTimeout(refreshStatus, 2500);
       }
     } catch (e: any) {
       Alert.alert('Error', e.message || 'Could not toggle screen capture');
     }
   }, [overlayActive, autoDetect, refreshStatus]);
+
+  const toggleAutoPlay = useCallback(async () => {
+    if (!overlayActive) {
+      Alert.alert('Start Overlay First', 'Enable the overlay and auto-detect first.');
+      return;
+    }
+    if (!autoDetect) {
+      Alert.alert('Enable Auto-Detect First',
+        'Auto-Detect must be ON so the app knows when the board is stable.');
+      return;
+    }
+    if (!accessibilityReady) {
+      Alert.alert(
+        'Accessibility Permission Required',
+        'AutoPlay injects swipe gestures to shoot the striker automatically.\n\n' +
+        'Steps:\n1. Tap "Open Settings" below\n2. Find "AIMxASSIST" in the list\n' +
+        '3. Enable "AIMxASSIST Autoplay"\n4. Come back here and try again.',
+        [
+          {text: 'Cancel', style: 'cancel'},
+          {text: 'Open Settings', onPress: () => {
+            try { OverlayModule.requestAccessibilityPermission(); } catch {}
+            setTimeout(refreshStatus, 3000);
+          }},
+        ],
+      );
+      return;
+    }
+    try {
+      const enabled = !autoPlay;
+      await OverlayModule.setAutoPlay(enabled);
+      setAutoPlay(enabled);
+    } catch (e: any) {
+      Alert.alert('AutoPlay Error', e.message);
+    }
+  }, [overlayActive, autoDetect, accessibilityReady, autoPlay, refreshStatus]);
 
   const handleModeSelect = useCallback((mode: ShotMode) => {
     setSelectedMode(mode);
@@ -162,7 +207,7 @@ export default function App() {
       <View style={styles.header}>
         <Text style={styles.logo}>AIMxASSIST</Text>
         <Text style={styles.subtitle}>
-          Auto-Detect Carrom Aim Assist • v3.0
+          v5.0 • AutoPlay + Indirect Shots • Android 8+
         </Text>
       </View>
 
@@ -180,15 +225,17 @@ export default function App() {
           </TouchableOpacity>
         )}
 
-        {/* Overlay + Auto-Detect controls */}
+        {/* Main controls card */}
         <View style={styles.card}>
+
+          {/* Aim overlay toggle */}
           <View style={styles.row}>
             <View style={{flex: 1, paddingRight: 8}}>
               <Text style={styles.cardTitle}>Aim Overlay</Text>
               <Text style={styles.cardSub}>
                 {overlayActive
-                  ? 'Running — tap floating icon in the game to show lines'
-                  : 'Start to draw aim lines on top of Carrom Pool'}
+                  ? 'Running — tap floating icon to show/hide lines'
+                  : 'Draw aim lines over Carrom Pool'}
               </Text>
             </View>
             <Switch value={overlayActive} onValueChange={toggleOverlay}
@@ -196,26 +243,67 @@ export default function App() {
               thumbColor={overlayActive ? '#FFF' : '#888'} />
           </View>
 
+          {/* Auto-detect toggle */}
           <View style={[styles.row, {marginTop: 14}]}>
             <View style={{flex: 1, paddingRight: 8}}>
               <Text style={styles.cardTitle}>Auto-Detect (CV)</Text>
               <Text style={styles.cardSub}>
                 {autoDetect
-                  ? 'Reading screen — striker, coins and pockets detected automatically'
-                  : 'Use computer vision to auto-place striker/coins (per-session permission)'}
+                  ? 'Reading screen — coins detected automatically'
+                  : 'Computer vision detects striker, coins, pockets'}
               </Text>
             </View>
             <Switch value={autoDetect} onValueChange={toggleAutoDetect}
               trackColor={{false: '#333', true: '#00E5FF'}}
               thumbColor={autoDetect ? '#FFF' : '#888'} />
           </View>
+
+          {/* AutoPlay toggle */}
+          <View style={[styles.row, {marginTop: 14}]}>
+            <View style={{flex: 1, paddingRight: 8}}>
+              <Text style={[styles.cardTitle, {color: autoPlay ? '#6B99FF' : '#FFF'}]}>
+                AutoPlay {autoPlay ? '(ON)' : ''}
+              </Text>
+              <Text style={styles.cardSub}>
+                {!accessibilityReady
+                  ? 'Needs Accessibility permission — tap toggle to set up'
+                  : autoPlay
+                  ? 'Auto-shooting — waits for stable board then swipes'
+                  : 'Auto-shoots striker when board is stable (no root!)'}
+              </Text>
+            </View>
+            <Switch value={autoPlay} onValueChange={toggleAutoPlay}
+              trackColor={{false: '#333', true: '#6B99FF'}}
+              thumbColor={autoPlay ? '#FFF' : '#888'} />
+          </View>
+
+          {/* Accessibility status indicator */}
+          {overlayActive && (
+            <TouchableOpacity
+              style={[styles.accessibilityBadge,
+                {backgroundColor: accessibilityReady ? '#0A2A0A' : '#2A1A00',
+                 borderColor: accessibilityReady ? '#22C55E' : '#FF8A00'}]}
+              onPress={() => {
+                if (!accessibilityReady) {
+                  try { OverlayModule.requestAccessibilityPermission(); } catch {}
+                  setTimeout(refreshStatus, 3000);
+                }
+              }}>
+              <Text style={{color: accessibilityReady ? '#22C55E' : '#FF8A00',
+                fontSize: 12, fontWeight: '700'}}>
+                {accessibilityReady
+                  ? '✓ Accessibility Ready — AutoPlay can inject gestures'
+                  : '⚠ Tap here → enable AIMxASSIST in Accessibility Settings'}
+              </Text>
+            </TouchableOpacity>
+          )}
         </View>
 
         {/* Shot mode */}
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Prediction Lines</Text>
           <Text style={styles.cardSub}>
-            "All Lines" shows every shot type at once in different colors
+            "All Lines" shows direct + wall-bounce shots in different colors
           </Text>
           <View style={styles.shotGrid}>
             {SHOT_MODES.map(({mode, label, desc}) => (
@@ -233,29 +321,10 @@ export default function App() {
           </View>
 
           <View style={styles.legend}>
-            <LegendDot color="#FFD700" label="Aim" />
-            <LegendDot color="#FF8A00" label="Coin" />
-            <LegendDot color="#FF3D71" label="Queen" />
-            <LegendDot color="#00E5FF" label="1-bounce" />
-            <LegendDot color="#D946EF" label="2-bounce" />
-            <LegendDot color="#22C55E" label="Pocket" />
-          </View>
-        </View>
-
-        {/* Sensitivity */}
-        <View style={styles.card}>
-          <View style={styles.rowSpread}>
-            <Text style={styles.cardTitle}>Shot Power</Text>
-            <Text style={styles.valueLabel}>{sensitivity.toFixed(1)}x</Text>
-          </View>
-          <Slider style={styles.slider}
-            minimumValue={0.3} maximumValue={3.0} step={0.1}
-            value={sensitivity} onValueChange={handleSensitivityChange}
-            minimumTrackTintColor="#FFD700" maximumTrackTintColor="#333"
-            thumbTintColor="#FFD700" />
-          <View style={styles.rowSpread}>
-            <Text style={styles.sliderEndLabel}>Soft</Text>
-            <Text style={styles.sliderEndLabel}>Hard</Text>
+            <LegendDot color="#FFD700" label="Direct" />
+            <LegendDot color="#AADDFF" label="1-cushion" />
+            <LegendDot color="#D946EF" label="2-cushion" />
+            <LegendDot color="#22C55E" label="Pocket line" />
           </View>
         </View>
 
@@ -268,9 +337,8 @@ export default function App() {
             </Text>
           </View>
           <Text style={styles.cardSub}>
-            Lower = detects more circles (more false positives).
-            Raise to 35–45 if you see too many ghost circles.
-            Higher = fewer, only the clearest circles.
+            Lower = more circles detected (more false positives). Raise to 35–45
+            if pink circles appear everywhere. Higher = only clearest circles.
           </Text>
           <Slider style={styles.slider}
             minimumValue={12} maximumValue={50} step={1}
@@ -283,7 +351,7 @@ export default function App() {
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Margin Calibration</Text>
           <Text style={styles.cardSub}>
-            Nudge the touch point if your screen reports a small offset
+            Nudge if aim lines are slightly offset from actual board position
           </Text>
           <View style={styles.tabRow}>
             {(['D2', 'E2', 'INSIDE'] as const).map(tab => (
@@ -335,21 +403,27 @@ export default function App() {
         <View style={styles.card}>
           <Text style={styles.cardTitle}>How to Use</Text>
           <Text style={styles.howToStep}>1. Grant "Draw over apps" permission</Text>
-          <Text style={styles.howToStep}>2. Turn on the Aim Overlay</Text>
-          <Text style={styles.howToStep}>3. Turn on Auto-Detect (grant screen capture — asked once per session)</Text>
-          <Text style={styles.howToStep}>4. Open Carrom Pool</Text>
-          <Text style={styles.howToStep}>5. Tap the floating icon → tap "Turn ON"</Text>
-          <Text style={styles.howToStep}>6. Aim lines appear automatically — no touch needed</Text>
-          <Text style={styles.howToStep}>7. Up to 5 best shots are shown, updating every ~30 FPS</Text>
+          <Text style={styles.howToStep}>2. Turn on Aim Overlay</Text>
+          <Text style={styles.howToStep}>3. Turn on Auto-Detect (grant screen capture once per session)</Text>
+          <Text style={styles.howToStep}>4. Open Carrom Disc Pool</Text>
+          <Text style={styles.howToStep}>5. Tap floating icon → Turn ON lines</Text>
+          <Text style={styles.howToStep}>6. Lines appear automatically — up to 7 shots shown</Text>
+          <View style={styles.autoPlayGuide}>
+            <Text style={styles.autoPlayGuideTitle}>AutoPlay Setup (one-time):</Text>
+            <Text style={styles.howToStep}>A. Tap the AutoPlay toggle above</Text>
+            <Text style={styles.howToStep}>B. Tap "Open Settings" → find AIMxASSIST</Text>
+            <Text style={styles.howToStep}>C. Enable "AIMxASSIST Autoplay"</Text>
+            <Text style={styles.howToStep}>D. Return here, enable AutoPlay toggle</Text>
+            <Text style={styles.howToStep}>E. App waits for board to stabilise then shoots!</Text>
+          </View>
           <Text style={styles.howToTip}>
-            Tip: the board is auto-detected by wood colour — if lines appear
-            outside the board, lower "Detection Sensitivity" slightly.
-            Watermark "created by abraham / Xhay" shows at board centre.
+            Colors: Gold = direct shot, Blue = 1-cushion bounce, Magenta = 2-cushion.
+            AutoPlay uses 72% power — adjust by changing Detection Sensitivity if shots are too weak/strong.
           </Text>
         </View>
 
         <View style={styles.footer}>
-          <Text style={styles.footerText}>AIMxASSIST v3.0 • Auto-Detect • Android 6+</Text>
+          <Text style={styles.footerText}>AIMxASSIST v5.0 • created by abraham / Xhay</Text>
         </View>
       </ScrollView>
     </View>
@@ -428,6 +502,17 @@ const styles = StyleSheet.create({
   howToTip: {
     color: '#FFD700', fontSize: 12, marginTop: 8,
     backgroundColor: '#22220A', padding: 10, borderRadius: 8,
+  },
+  accessibilityBadge: {
+    marginTop: 12, padding: 10, borderRadius: 8, borderWidth: 1,
+  },
+  autoPlayGuide: {
+    marginTop: 10, padding: 10,
+    backgroundColor: '#0D1A2A', borderRadius: 8,
+    borderWidth: 1, borderColor: '#6B99FF',
+  },
+  autoPlayGuideTitle: {
+    color: '#6B99FF', fontSize: 13, fontWeight: '700', marginBottom: 6,
   },
   footer: {alignItems: 'center', marginTop: 10},
   footerText: {color: '#444466', fontSize: 11},
