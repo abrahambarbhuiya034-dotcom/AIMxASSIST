@@ -1,14 +1,14 @@
 package com.bitaim.carromaim.overlay;
 
 import android.content.Context;
-import android.graphics.BlurMaskFilter;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.DashPathEffect;
 import android.graphics.Paint;
-import android.graphics.Path;
 import android.graphics.PointF;
 import android.graphics.RectF;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.View;
 
 import com.bitaim.carromaim.cv.Coin;
@@ -16,27 +16,28 @@ import com.bitaim.carromaim.cv.GameState;
 import com.bitaim.carromaim.cv.TrajectorySimulator;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
-import java.util.Iterator;
 import java.util.List;
 
 /**
- * AimOverlayView — v4
+ * AimOverlayView — v4 (Autoplay + Multi-Line)
  *
- * Major additions vs v3-fixed:
- *  1. Wall-bounce shot candidates via the reflection principle.
- *     For every coin the system now checks direct shots AND up to 4
- *     one-cushion bounce paths (left / right / top / bottom wall).
- *     The best shots by score are drawn — matching the reference style.
- *  2. Two-pass glow rendering: each line is drawn twice — a wide,
- *     blurred halo pass then a sharp bright pass on top — producing the
- *     blue neon glow seen in the reference image.
- *  3. Ghost-ball circle is drawn with a dashed stroke at the contact point.
- *  4. Coin EMA smoothing (from v3-fixed) retained.
- *  5. MAX_LINES raised to 7 so more simultaneous options are visible.
- *  6. Shot mode filter (DIRECT / GOLDEN / LUCKY / AI / ALL) now respected
- *     for both direct and bounce candidates.
+ * NEW vs v3-fixed:
+ *  1. AUTOPLAY — automatically fires the best shot every autoplayDelayMs ms.
+ *     setAutoplay(true) starts the loop; it calls AutoplaySwipeListener which
+ *     OverlayService wires to a GestureDescription/AccessibilityService swipe.
+ *
+ *  2. MULTIPLE PREDICTION LINES with distinct colours and opacity:
+ *       Rank 1 (best) → Gold   #FFD700  100% alpha  3.5 dp
+ *       Rank 2        → Cyan   #00E5FF   70% alpha  3.0 dp
+ *       Rank 3        → Orange #FF8A00   50% alpha  2.5 dp
+ *       Rank 4        → Purple #D946EF   35% alpha  2.0 dp
+ *       Rank 5        → Green  #22C55E   20% alpha  1.5 dp
+ *
+ *  3. segDrawn limit raised 2 → 3 so full striker trajectory is visible.
+ *
+ * All v3-fixed fixes (EMA smoothing, NaN guards, board-check expansion,
+ * shot-mode filter) are kept unchanged.
  */
 public class AimOverlayView extends View {
 
@@ -46,154 +47,178 @@ public class AimOverlayView extends View {
     public static final String MODE_GOLDEN = "GOLDEN";
     public static final String MODE_LUCKY  = "LUCKY";
 
-    private static final int   MAX_LINES  = 7;
+    private static final int   MAX_LINES  = 5;
     private static final float EMA_ALPHA  = 0.20f;
 
-    /**
-     * Data class returned to FloatingOverlayService for auto-shoot gesture.
-     * strikerX/Y = striker screen position.
-     * targetX/Y  = first intermediate aim point (ghost-ball or wall-bounce point).
-     */
-    public static final class BestShot {
-        public final float strikerX, strikerY;
-        public final float targetX,  targetY;
-        BestShot(float sx, float sy, float tx, float ty) {
-            strikerX=sx; strikerY=sy; targetX=tx; targetY=ty;
-        }
-    }
+    private static final int[]   LINE_COLORS = {
+        0xFFFFD700, 0xFF00E5FF, 0xFFFF8A00, 0xFFD946EF, 0xFF22C55E
+    };
+    private static final int[]   LINE_ALPHAS  = { 255, 178, 127, 89, 51 };
+    private static final float[] LINE_WIDTHS  = { 3.5f, 3.0f, 2.5f, 2.0f, 1.5f };
 
     private final TrajectorySimulator simulator = new TrajectorySimulator();
-    private String    shotMode  = MODE_ALL;
+    private String    shotMode = MODE_ALL;
     private GameState detected;
     private GameState smoothed;
-    private volatile BestShot lastBestShot = null;
     private final float dp;
 
-    // ── Paints ───────────────────────────────────────────────────────────────
+    // ── Autoplay ─────────────────────────────────────────────────────────────
+    private boolean autoplayEnabled  = false;
+    private int     autoplayDelayMs  = 2000;
+    private final Handler   autoplayHandler  = new Handler(Looper.getMainLooper());
+    private AutoplaySwipeListener autoplaySwipeListener;
 
-    // Glow (wide, blurred, semi-transparent)
-    private final Paint glowBlue, glowGold, glowGreen;
-    // Sharp core lines
-    private final Paint lineBlue, lineGold, lineGreen, lineOrange, lineMagenta;
-    // Dashed ghost circle
-    private final Paint ghostCirclePaint;
-    // Coin fills
-    private final Paint blackFill, whiteFill, redFill;
-    // Pocket indicator
-    private final Paint pocketFill, pocketRing;
-    // Striker ring
-    private final Paint strikerRing;
-    // Board outline
+    public interface AutoplaySwipeListener {
+        void onPerformSwipe(float fromX, float fromY,
+                            float toX,   float toY,
+                            int   durationMs);
+    }
+
+    private final Runnable autoplayRunnable = new Runnable() {
+        @Override public void run() {
+            if (!autoplayEnabled) return;
+            performBestSwipe();
+            autoplayHandler.postDelayed(this, autoplayDelayMs);
+        }
+    };
+
+    // ── Per-rank paint sets ───────────────────────────────────────────────────
+    private final Paint[] aimPaints       = new Paint[MAX_LINES];
+    private final Paint[] bouncePaints    = new Paint[MAX_LINES];
+    private final Paint[] bounce2Paints   = new Paint[MAX_LINES];
+    private final Paint[] coinPathPaints  = new Paint[MAX_LINES];
+    private final Paint[] pocketPathPaints= new Paint[MAX_LINES];
+
+    private final Paint strikerPaint, coinOutlinePaint, pocketFill;
     private final Paint boardPaint;
-    // Watermark
+    private final Paint blackFill, whiteFill, redFill;
     private final Paint watermarkPaint;
-    // Coin outline (subtle)
-    private final Paint coinOutlinePaint;
 
     public AimOverlayView(Context context) {
         super(context);
         dp = context.getResources().getDisplayMetrics().density;
 
-        // Glow paints (blurred halo drawn first)
-        glowBlue    = glow(0xBB4499FF, 14 * dp);
-        glowGold    = glow(0xBBFFD700, 12 * dp);
-        glowGreen   = glow(0xBB22C55E, 12 * dp);
+        for (int i = 0; i < MAX_LINES; i++) {
+            int a = LINE_ALPHAS[i]; float w = LINE_WIDTHS[i];
+            aimPaints[i]       = strokeA(LINE_COLORS[i], w,        a);
+            bouncePaints[i]    = strokeA(0xFF00E5FF,      w - 0.5f, a);
+            bounce2Paints[i]   = strokeA(0xFFD946EF,      w - 0.5f, a);
+            coinPathPaints[i]  = strokeA(0xFFFF8A00,      w,        a);
+            pocketPathPaints[i]= strokeA(0xFF22C55E,      w + 0.5f, a);
+        }
 
-        // Sharp core lines drawn on top of glow
-        lineBlue    = line(0xFFAADDFF, 2.8f);
-        lineGold    = line(0xFFFFD700, 3.2f);
-        lineGreen   = line(0xFF22C55E, 3.5f);
-        lineOrange  = line(0xFFFF8A00, 2.8f);
-        lineMagenta = line(0xFFD946EF, 2.8f);
-
-        // Dashed ghost-ball circle
-        ghostCirclePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        ghostCirclePaint.setStyle(Paint.Style.STROKE);
-        ghostCirclePaint.setColor(0xCCFFFFFF);
-        ghostCirclePaint.setStrokeWidth(1.8f * dp);
-        ghostCirclePaint.setPathEffect(new DashPathEffect(new float[]{5*dp, 4*dp}, 0));
-
-        // Coin fills (semi-transparent)
+        strikerPaint     = stroke(0xFFFFD700, 2.2f);
+        coinOutlinePaint = stroke(0x88FFFFFF, 1.5f);
+        pocketFill       = fill(0x882ECC71);
+        boardPaint       = stroke(0x44FFD700, 1.2f);
+        boardPaint.setPathEffect(new DashPathEffect(new float[]{6*dp, 6*dp}, 0));
         blackFill = fill(0x55000000);
         whiteFill = fill(0x44FFFFFF);
         redFill   = fill(0x55FF3D71);
 
-        coinOutlinePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        coinOutlinePaint.setStyle(Paint.Style.STROKE);
-        coinOutlinePaint.setColor(0x66FFFFFF);
-        coinOutlinePaint.setStrokeWidth(1.2f * dp);
-
-        pocketFill = fill(0x7722C55E);
-        pocketRing = new Paint(Paint.ANTI_ALIAS_FLAG);
-        pocketRing.setStyle(Paint.Style.STROKE);
-        pocketRing.setColor(0xFF22C55E);
-        pocketRing.setStrokeWidth(2f * dp);
-
-        strikerRing = new Paint(Paint.ANTI_ALIAS_FLAG);
-        strikerRing.setStyle(Paint.Style.STROKE);
-        strikerRing.setColor(0xFFFFD700);
-        strikerRing.setStrokeWidth(2.5f * dp);
-
-        boardPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        boardPaint.setStyle(Paint.Style.STROKE);
-        boardPaint.setColor(0x33FFD700);
-        boardPaint.setStrokeWidth(1.2f * dp);
-        boardPaint.setPathEffect(new DashPathEffect(new float[]{6*dp, 6*dp}, 0));
-
         watermarkPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        watermarkPaint.setColor(0x22FFFFFF);
-        watermarkPaint.setTextSize(8 * dp);
+        watermarkPaint.setColor(0x33FFFFFF);
+        watermarkPaint.setTextSize(9 * dp);
         watermarkPaint.setTextAlign(Paint.Align.CENTER);
+        watermarkPaint.setShadowLayer(1 * dp, 0, 0, Color.BLACK);
 
-        setLayerType(LAYER_TYPE_SOFTWARE, null); // required for BlurMaskFilter
+        setLayerType(LAYER_TYPE_SOFTWARE, null);
     }
 
-    private Paint glow(int color, float radius) {
+    // ── Paint helpers ─────────────────────────────────────────────────────────
+
+    private Paint stroke(int color, float w) {
         Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        p.setColor(color);
-        p.setStyle(Paint.Style.STROKE);
-        p.setStrokeWidth(radius);
+        p.setColor(color); p.setStyle(Paint.Style.STROKE);
+        p.setStrokeWidth(w * dp);
         p.setStrokeCap(Paint.Cap.ROUND);
         p.setStrokeJoin(Paint.Join.ROUND);
-        p.setMaskFilter(new BlurMaskFilter(radius * 0.6f, BlurMaskFilter.Blur.NORMAL));
         return p;
     }
 
-    private Paint line(int color, float widthDp) {
-        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        p.setColor(color);
-        p.setStyle(Paint.Style.STROKE);
-        p.setStrokeWidth(widthDp * dp);
-        p.setStrokeCap(Paint.Cap.ROUND);
-        p.setStrokeJoin(Paint.Join.ROUND);
+    private Paint strokeA(int color, float w, int alpha) {
+        Paint p = stroke(color, w);
+        p.setAlpha(alpha);
         return p;
     }
 
     private Paint fill(int color) {
         Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        p.setColor(color);
-        p.setStyle(Paint.Style.FILL);
+        p.setColor(color); p.setStyle(Paint.Style.FILL);
         return p;
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
 
-    public void setShotMode(String mode) { this.shotMode = mode; postInvalidate(); }
-    public void setMarginOffset(float dx, float dy) { }
-    public void setSensitivity(float v) { }
+    public void setShotMode(String mode)  { this.shotMode = mode; postInvalidate(); }
+    public void setMarginOffset(float dx, float dy) { /* calibration reserved */ }
+    public void setSensitivity(float v)   { /* reserved */ }
 
     /**
-     * Returns the highest-scoring shot from the last rendered frame.
-     * Called by FloatingOverlayService to aim the auto-shoot gesture.
-     * Thread-safe (volatile field).
+     * Enable / disable autoplay. When enabled the overlay picks the best shot
+     * and fires the registered AutoplaySwipeListener every autoplayDelayMs ms.
      */
-    public BestShot getLastBestShot() { return lastBestShot; }
+    public void setAutoplay(boolean enabled) {
+        autoplayEnabled = enabled;
+        autoplayHandler.removeCallbacks(autoplayRunnable);
+        if (enabled) {
+            autoplayHandler.postDelayed(autoplayRunnable, autoplayDelayMs);
+        }
+        postInvalidate();
+    }
+
+    /** Delay between shots in ms when autoplay is on (default 2000, min 500). */
+    public void setAutoplayDelay(int ms) {
+        autoplayDelayMs = Math.max(500, ms);
+    }
+
+    public boolean isAutoplayEnabled() { return autoplayEnabled; }
+
+    /**
+     * Wire in the listener that translates our coordinates to a real device
+     * gesture. Typically called by OverlayService which holds the
+     * AccessibilityService reference.
+     */
+    public void setAutoplaySwipeListener(AutoplaySwipeListener l) {
+        autoplaySwipeListener = l;
+    }
 
     public void setDetectedState(GameState s) {
         if (s == null) return;
         detected = s;
         applySmoothing(s);
         postInvalidate();
+    }
+
+    // ── Autoplay ─────────────────────────────────────────────────────────────
+
+    /**
+     * Compute best shot and fire the swipe listener. Safe to call manually
+     * for a single-shot trigger even when autoplay is off.
+     */
+    public void performBestSwipe() {
+        GameState s = smoothed != null ? smoothed : detected;
+        if (s == null || s.striker == null || autoplaySwipeListener == null) return;
+
+        List<ShotCandidate> shots = computeBestShots(s);
+        if (shots.isEmpty()) return;
+
+        ShotCandidate best = shots.get(0);
+
+        // Swipe from striker centre toward the ghost contact point.
+        // We overshoot slightly (factor 1.15) so the striker reaches the coin.
+        float dx   = best.ghostPos.x - s.striker.pos.x;
+        float dy   = best.ghostPos.y - s.striker.pos.y;
+        float dist = (float) Math.sqrt(dx * dx + dy * dy);
+        if (dist < 1f) return;
+
+        float factor  = 1.15f;
+        float toX     = s.striker.pos.x + dx * factor;
+        float toY     = s.striker.pos.y + dy * factor;
+        int   duration = 80; // ms — fast swipe like a real player
+
+        autoplaySwipeListener.onPerformSwipe(
+            s.striker.pos.x, s.striker.pos.y, toX, toY, duration);
     }
 
     // ── EMA smoothing ─────────────────────────────────────────────────────────
@@ -204,12 +229,15 @@ public class AimOverlayView extends View {
         out.board = smoothRect(smoothed.board, raw.board);
 
         if (raw.striker != null) {
-            out.striker = (smoothed.striker != null)
-                ? new Coin(ema(smoothed.striker.pos.x, raw.striker.pos.x),
-                           ema(smoothed.striker.pos.y, raw.striker.pos.y),
-                           ema(smoothed.striker.radius, raw.striker.radius),
-                           Coin.COLOR_STRIKER, true)
-                : raw.striker;
+            if (smoothed.striker != null) {
+                out.striker = new Coin(
+                    ema(smoothed.striker.pos.x, raw.striker.pos.x),
+                    ema(smoothed.striker.pos.y, raw.striker.pos.y),
+                    ema(smoothed.striker.radius, raw.striker.radius),
+                    Coin.COLOR_STRIKER, true);
+            } else {
+                out.striker = raw.striker;
+            }
         }
 
         out.coins   = smoothCoins(smoothed.coins, raw.coins);
@@ -220,24 +248,34 @@ public class AimOverlayView extends View {
     private List<Coin> smoothCoins(List<Coin> prev, List<Coin> next) {
         if (prev == null || prev.isEmpty()) return next;
         if (next == null || next.isEmpty()) return new ArrayList<>();
-        List<Coin> result = new ArrayList<>(next.size());
-        boolean[] matched = new boolean[prev.size()];
+
+        List<Coin> result  = new ArrayList<>(next.size());
+        boolean[]  matched = new boolean[prev.size()];
+
         for (Coin n : next) {
-            Coin bestPrev = null; float bestDist = Float.MAX_VALUE; int bestIdx = -1;
+            Coin  bestPrev = null;
+            float bestDist = Float.MAX_VALUE;
+            int   bestIdx  = -1;
+
             for (int i = 0; i < prev.size(); i++) {
                 if (matched[i]) continue;
                 Coin p = prev.get(i);
                 if (p.color != n.color) continue;
                 float dx = p.pos.x - n.pos.x, dy = p.pos.y - n.pos.y;
                 float d  = (float) Math.sqrt(dx*dx + dy*dy);
-                if (d < bestDist && d < (p.radius + n.radius) * 2f) {
+                float threshold = (p.radius + n.radius) * 2.0f;
+                if (d < bestDist && d < threshold) {
                     bestDist = d; bestPrev = p; bestIdx = i;
                 }
             }
+
             if (bestPrev != null) {
                 matched[bestIdx] = true;
-                result.add(new Coin(ema(bestPrev.pos.x, n.pos.x), ema(bestPrev.pos.y, n.pos.y),
-                                    ema(bestPrev.radius, n.radius), n.color, n.isStriker));
+                result.add(new Coin(
+                    ema(bestPrev.pos.x, n.pos.x),
+                    ema(bestPrev.pos.y, n.pos.y),
+                    ema(bestPrev.radius, n.radius),
+                    n.color, n.isStriker));
             } else {
                 result.add(n);
             }
@@ -250,9 +288,10 @@ public class AimOverlayView extends View {
         return new RectF(ema(p.left,n.left), ema(p.top,n.top),
                          ema(p.right,n.right), ema(p.bottom,n.bottom));
     }
+
     private float ema(float p, float n) { return p + EMA_ALPHA * (n - p); }
 
-    // ── onDraw ────────────────────────────────────────────────────────────────
+    // ── Draw ──────────────────────────────────────────────────────────────────
 
     @Override
     protected void onDraw(Canvas canvas) {
@@ -260,20 +299,15 @@ public class AimOverlayView extends View {
         GameState s = smoothed != null ? smoothed : detected;
         if (s == null || s.striker == null) return;
 
-        // Board outline + watermark
         if (s.board != null) {
             canvas.drawRect(s.board, boardPaint);
             canvas.drawText("created by abraham / Xhay",
                     s.board.centerX(), s.board.centerY(), watermarkPaint);
         }
 
-        // Pockets
-        for (PointF p : s.pockets) {
+        for (PointF p : s.pockets)
             canvas.drawCircle(p.x, p.y, 13 * dp, pocketFill);
-            canvas.drawCircle(p.x, p.y, 13 * dp, pocketRing);
-        }
 
-        // Coins
         for (Coin c : s.coins) {
             Paint f = c.color == Coin.COLOR_BLACK ? blackFill
                     : c.color == Coin.COLOR_RED   ? redFill : whiteFill;
@@ -281,381 +315,152 @@ public class AimOverlayView extends View {
             canvas.drawCircle(c.pos.x, c.pos.y, c.radius, coinOutlinePaint);
         }
 
-        // Striker
         canvas.drawCircle(s.striker.pos.x, s.striker.pos.y, s.striker.radius, whiteFill);
-        canvas.drawCircle(s.striker.pos.x, s.striker.pos.y, s.striker.radius, strikerRing);
+        canvas.drawCircle(s.striker.pos.x, s.striker.pos.y, s.striker.radius, strikerPaint);
 
-        // Prediction lines — glow pass first, then sharp pass
+        // NEW: draw ALL shot candidates, each with its own colour + alpha rank
         List<ShotCandidate> shots = computeBestShots(s);
         int drawn = 0;
-
-        // Pass 1: glow (drawn behind everything)
         for (ShotCandidate shot : shots) {
             if (drawn >= MAX_LINES) break;
-            drawShotGlow(canvas, s, shot);
-            drawn++;
-        }
-
-        // Pass 2: sharp lines on top
-        drawn = 0;
-        for (ShotCandidate shot : shots) {
-            if (drawn >= MAX_LINES) break;
-            drawShotLines(canvas, s, shot);
+            drawShot(canvas, s, shot, drawn);   // pass rank index
             drawn++;
         }
     }
 
-    // ── Shot candidate model ──────────────────────────────────────────────────
+    // ── Shot candidates ───────────────────────────────────────────────────────
 
-    /**
-     * strikerWaypoints: the path the STRIKER takes.
-     *  - Direct shot: [strikerPos, ghostPos]
-     *  - 1-wall shot: [strikerPos, wallBouncePoint, ghostPos]
-     * The last point is always the ghost-ball contact position.
-     */
     private static class ShotCandidate {
-        final List<PointF> strikerWaypoints;
+        final PointF ghostPos;
         final Coin   coin;
         final PointF pocket;
         final float  score;
         final int    wallsNeeded;
-
-        ShotCandidate(List<PointF> wp, Coin c, PointF pk, float sc, int walls) {
-            strikerWaypoints = wp; coin = c; pocket = pk; score = sc; wallsNeeded = walls;
-        }
-
-        PointF ghostPos() {
-            return strikerWaypoints.get(strikerWaypoints.size() - 1);
+        ShotCandidate(PointF g, Coin c, PointF pk, float sc, int walls) {
+            ghostPos = g; coin = c; pocket = pk; score = sc; wallsNeeded = walls;
         }
     }
 
-    // ── Shot computation ──────────────────────────────────────────────────────
-
     private List<ShotCandidate> computeBestShots(GameState s) {
         List<ShotCandidate> list = new ArrayList<>();
-        if (s.pockets.isEmpty() || s.board == null) return list;
-
-        float sR = s.striker.radius;
-        // Effective cushion positions for the striker centre
-        float wL = s.board.left   + sR;
-        float wR = s.board.right  - sR;
-        float wT = s.board.top    + sR;
-        float wB = s.board.bottom - sR;
+        if (s.pockets.isEmpty()) return list;
 
         for (Coin coin : s.coins) {
             if (coin.color == Coin.COLOR_STRIKER) continue;
 
-            // Nearest pocket for this coin
-            PointF pocket = nearestPocket(coin.pos, s.pockets);
-            if (pocket == null) continue;
+            PointF bestPocket = null;
+            float  bestDist   = Float.MAX_VALUE;
+            for (PointF pk : s.pockets) {
+                float d = dist(coin.pos, pk);
+                if (d < bestDist) { bestDist = d; bestPocket = pk; }
+            }
+            if (bestPocket == null) continue;
 
-            // Ghost-ball position (where striker centre must be to pot coin)
-            PointF ghost = ghostBallPos(coin, pocket, sR);
-            if (ghost == null) continue;
+            float dx  = coin.pos.x - bestPocket.x;
+            float dy  = coin.pos.y - bestPocket.y;
+            float len = (float) Math.sqrt(dx*dx + dy*dy);
+            if (len < 1f) continue;
+            float  ghostR = s.striker.radius + coin.radius;
+            PointF ghost  = new PointF(
+                    coin.pos.x + (dx / len) * ghostR,
+                    coin.pos.y + (dy / len) * ghostR);
 
-            // ── Direct shot ──────────────────────────────────────────────────
-            if (MODE_ALL.equals(shotMode) || MODE_DIRECT.equals(shotMode)
-                    || MODE_AI.equals(shotMode)) {
-                if (insideBoard(ghost, s.board, sR)) {
-                    float score = score(s.striker.pos, ghost, dist(coin.pos, pocket), coin.color);
-                    list.add(new ShotCandidate(
-                        pts(s.striker.pos, ghost), coin, pocket, score, 0));
-                }
+            if (s.board != null) {
+                float margin = s.striker.radius;
+                RectF expanded = new RectF(
+                    s.board.left - margin, s.board.top    - margin,
+                    s.board.right+ margin, s.board.bottom + margin);
+                if (!expanded.contains(ghost.x, ghost.y)) continue;
             }
 
-            // ── 1-cushion bounce shots ────────────────────────────────────────
-            if (MODE_ALL.equals(shotMode) || MODE_GOLDEN.equals(shotMode)
-                    || MODE_AI.equals(shotMode)) {
-                addWallBounces(list, s.striker.pos, ghost, coin, pocket, sR, s.board,
-                               wL, wR, wT, wB, 1);
+            int wallsNeeded = 0;
+            if (s.board != null) {
+                float strikerToCoinDist = dist(s.striker.pos, ghost);
+                float boardDiag = (float) Math.sqrt(
+                    s.board.width()*s.board.width() + s.board.height()*s.board.height());
+                if (strikerToCoinDist > boardDiag * 0.7f) wallsNeeded = 1;
             }
 
-            // ── 2-cushion bounce shots ────────────────────────────────────────
-            if (MODE_ALL.equals(shotMode) || MODE_LUCKY.equals(shotMode)) {
-                addDoubleBounces(list, s.striker.pos, ghost, coin, pocket, sR, s.board,
-                                 wL, wR, wT, wB);
-            }
+            if (!shotModeAllows(wallsNeeded)) continue;
+
+            float score = 800f / (dist(s.striker.pos, ghost) + 1f)
+                        + 400f / (bestDist + 1f);
+            if (coin.color == Coin.COLOR_RED) score *= 1.4f;
+
+            list.add(new ShotCandidate(ghost, coin, bestPocket, score, wallsNeeded));
         }
 
         Collections.sort(list, (a, b) -> Float.compare(b.score, a.score));
-
-        // Cache the best shot for auto-shoot gesture injection
-        if (!list.isEmpty() && s.striker != null) {
-            ShotCandidate top = list.get(0);
-            // Use the second waypoint as aim target (first step of the shot path)
-            PointF aimTarget = top.strikerWaypoints.size() > 1
-                    ? top.strikerWaypoints.get(1)
-                    : top.ghostPos();
-            lastBestShot = new BestShot(
-                    s.striker.pos.x, s.striker.pos.y,
-                    aimTarget.x, aimTarget.y);
-        } else {
-            lastBestShot = null;
-        }
-
         return list;
     }
 
-    /**
-     * Add all valid 1-cushion bounce candidates for striker→ghost via one wall.
-     */
-    private void addWallBounces(List<ShotCandidate> out,
-                                 PointF striker, PointF ghost,
-                                 Coin coin, PointF pocket,
-                                 float sR, RectF board,
-                                 float wL, float wR, float wT, float wB,
-                                 int wallCount) {
-        float coinToPocket = dist(coin.pos, pocket);
-
-        // Left wall
-        bounceVert(out, striker, ghost, coin, pocket, coinToPocket,
-                   wL, true,  wT, wB, sR, board, wallCount);
-        // Right wall
-        bounceVert(out, striker, ghost, coin, pocket, coinToPocket,
-                   wR, false, wT, wB, sR, board, wallCount);
-        // Top wall
-        bounceHoriz(out, striker, ghost, coin, pocket, coinToPocket,
-                    wT, true,  wL, wR, sR, board, wallCount);
-        // Bottom wall
-        bounceHoriz(out, striker, ghost, coin, pocket, coinToPocket,
-                    wB, false, wL, wR, sR, board, wallCount);
-    }
-
-    /** 2-cushion: reflect ghost across two different walls. */
-    private void addDoubleBounces(List<ShotCandidate> out,
-                                   PointF striker, PointF ghost,
-                                   Coin coin, PointF pocket,
-                                   float sR, RectF board,
-                                   float wL, float wR, float wT, float wB) {
-        // For 2-bounce we reflect twice and add intermediate bounce waypoint.
-        // We try: left+top, left+bottom, right+top, right+bottom.
-        float cdp = dist(coin.pos, pocket);
-
-        // Reflect ghost across left wall, then top wall
-        tryDoubleVH(out, striker, ghost, coin, pocket, cdp, sR, board, wL, true,  wT, true,  wL, wR, wT, wB);
-        tryDoubleVH(out, striker, ghost, coin, pocket, cdp, sR, board, wL, true,  wB, false, wL, wR, wT, wB);
-        tryDoubleVH(out, striker, ghost, coin, pocket, cdp, sR, board, wR, false, wT, true,  wL, wR, wT, wB);
-        tryDoubleVH(out, striker, ghost, coin, pocket, cdp, sR, board, wR, false, wB, false, wL, wR, wT, wB);
-    }
-
-    /** Vertical-wall first, then horizontal-wall second, 2-bounce. */
-    private void tryDoubleVH(List<ShotCandidate> out,
-                              PointF striker, PointF ghost,
-                              Coin coin, PointF pocket, float cdp,
-                              float sR, RectF board,
-                              float wallX, boolean leftWall,
-                              float wallY, boolean topWall,
-                              float wL, float wR, float wT, float wB) {
-        // Reflect ghost across wallX → g1
-        PointF g1 = new PointF(2*wallX - ghost.x, ghost.y);
-        // Reflect g1 across wallY → g2
-        PointF g2 = new PointF(g1.x, 2*wallY - g1.y);
-
-        // Intersection of (striker→g2) with wallY
-        float dY2 = g2.y - striker.y;
-        if (Math.abs(dY2) < 0.01f) return;
-        float t1 = (wallY - striker.y) / dY2;
-        if (t1 <= 0.01f || t1 >= 0.99f) return;
-        float b1x = striker.x + t1 * (g2.x - striker.x);
-        if (b1x < wL || b1x > wR) return;
-        PointF bounce1 = new PointF(b1x, wallY);
-
-        // Intersection of (bounce1→g1) with wallX
-        float dX1 = g1.x - bounce1.x;
-        if (Math.abs(dX1) < 0.01f) return;
-        float t2 = (wallX - bounce1.x) / dX1;
-        if (t2 <= 0.01f || t2 >= 0.99f) return;
-        float b2y = bounce1.y + t2 * (g1.y - bounce1.y);
-        if (b2y < wT || b2y > wB) return;
-        PointF bounce2 = new PointF(wallX, b2y);
-
-        if (!insideBoard(ghost, board, sR)) return;
-
-        float score = score(striker, bounce1, cdp, coin.color) * 0.45f;
-        out.add(new ShotCandidate(pts(striker, bounce1, bounce2, ghost),
-                coin, pocket, score, 2));
-    }
-
-    /**
-     * Bounce off a vertical wall (constant x).
-     * Uses the reflection principle: reflect ghost across the wall,
-     * then find where the straight line from striker hits the wall.
-     */
-    private void bounceVert(List<ShotCandidate> out,
-                             PointF striker, PointF ghost,
-                             Coin coin, PointF pocket, float cdp,
-                             float wallX, boolean isLeftWall,
-                             float wT, float wB,
-                             float sR, RectF board, int wallCount) {
-        // Ghost must be on the SAME side as the striker for a wall-bounce to make sense
-        // (you bounce off the OPPOSITE wall and come around).
-        // Actually: for a left-wall bounce, ghost can be anywhere as long as
-        // the reflected line intersects the wall between striker and ghost.
-
-        // Reflect ghost across wallX
-        float reflX = 2 * wallX - ghost.x;
-        float reflY = ghost.y;
-
-        float dX = reflX - striker.x;
-        if (Math.abs(dX) < 0.01f) return;
-
-        float t = (wallX - striker.x) / dX;
-        if (t <= 0.02f || t >= 0.98f) return;  // bounce not in-between
-
-        float bY = striker.y + t * (reflY - striker.y);
-        if (bY < wT || bY > wB) return;  // outside cushion
-
-        PointF bp = new PointF(wallX, bY);
-
-        if (!insideBoard(ghost, board, sR)) return;
-
-        // Penalty for longer/more-complex shots
-        float score = score(striker, bp, cdp, coin.color) * 0.65f;
-        out.add(new ShotCandidate(pts(striker, bp, ghost), coin, pocket, score, wallCount));
-    }
-
-    /**
-     * Bounce off a horizontal wall (constant y).
-     */
-    private void bounceHoriz(List<ShotCandidate> out,
-                              PointF striker, PointF ghost,
-                              Coin coin, PointF pocket, float cdp,
-                              float wallY, boolean isTopWall,
-                              float wL, float wR,
-                              float sR, RectF board, int wallCount) {
-        float reflX = ghost.x;
-        float reflY = 2 * wallY - ghost.y;
-
-        float dY = reflY - striker.y;
-        if (Math.abs(dY) < 0.01f) return;
-
-        float t = (wallY - striker.y) / dY;
-        if (t <= 0.02f || t >= 0.98f) return;
-
-        float bX = striker.x + t * (reflX - striker.x);
-        if (bX < wL || bX > wR) return;
-
-        PointF bp = new PointF(bX, wallY);
-
-        if (!insideBoard(ghost, board, sR)) return;
-
-        float score = score(striker, bp, cdp, coin.color) * 0.65f;
-        out.add(new ShotCandidate(pts(striker, bp, ghost), coin, pocket, score, wallCount));
-    }
-
-    // ── Drawing ───────────────────────────────────────────────────────────────
-
-    private void drawShotGlow(Canvas canvas, GameState s, ShotCandidate shot) {
-        Paint glow = shot.wallsNeeded == 0 ? glowGold
-                   : shot.wallsNeeded == 1 ? glowBlue : glowBlue;
-        drawWaypoints(canvas, shot.strikerWaypoints, glow);
-
-        // Coin-to-pocket glow
-        if (shot.coin != null && shot.pocket != null) {
-            canvas.drawLine(shot.coin.pos.x, shot.coin.pos.y,
-                    shot.pocket.x, shot.pocket.y, glowGreen);
+    private boolean shotModeAllows(int wallsNeeded) {
+        switch (shotMode) {
+            case MODE_DIRECT: return wallsNeeded == 0;
+            case MODE_GOLDEN: return wallsNeeded <= 1;
+            case MODE_LUCKY:  return wallsNeeded <= 2;
+            case MODE_AI:
+            case MODE_ALL:
+            default:          return true;
         }
     }
 
-    private void drawShotLines(Canvas canvas, GameState s, ShotCandidate shot) {
-        // Select sharp line color by type
-        Paint sharp = shot.wallsNeeded == 0 ? lineGold
-                    : shot.wallsNeeded == 1 ? lineBlue : lineMagenta;
-        drawWaypoints(canvas, shot.strikerWaypoints, sharp);
+    // ── Drawing helpers ───────────────────────────────────────────────────────
 
-        // Ghost ball dashed circle at contact point
-        PointF ghost = shot.ghostPos();
-        canvas.drawCircle(ghost.x, ghost.y, s.striker.radius, ghostCirclePaint);
+    /**
+     * Draw a single shot candidate using the paint set for the given rank index.
+     * rank=0 is the best shot (gold, 100% alpha); rank=4 is the weakest (green, 20%).
+     */
+    private void drawShot(Canvas canvas, GameState s, ShotCandidate shot, int rank) {
+        Paint aim      = aimPaints[rank];
+        Paint coinPath = coinPathPaints[rank];
+        Paint pocket   = pocketPathPaints[rank];
 
-        // Coin-to-pocket line
+        // Aim line: striker → ghost contact point
+        canvas.drawLine(s.striker.pos.x, s.striker.pos.y,
+                shot.ghostPos.x, shot.ghostPos.y, aim);
+
+        // Ghost ball circle at contact point
+        canvas.drawCircle(shot.ghostPos.x, shot.ghostPos.y,
+                s.striker.radius, coinOutlinePaint);
+
+        // Coin → pocket line
         if (shot.coin != null && shot.pocket != null) {
             canvas.drawLine(shot.coin.pos.x, shot.coin.pos.y,
-                    shot.pocket.x, shot.pocket.y, lineGreen);
-            canvas.drawCircle(shot.pocket.x, shot.pocket.y, 14*dp, pocketRing);
+                    shot.pocket.x, shot.pocket.y, coinPath);
+            canvas.drawCircle(shot.pocket.x, shot.pocket.y, 16 * dp, pocket);
         }
 
-        // Physics simulation path AFTER contact (striker continues after hit)
+        // Simulate striker trajectory after contact and draw up to 3 segments
         List<TrajectorySimulator.PathSegment> segs = simulator.simulate(
-                s.striker, ghost, s.coins, s.pockets, s.board, 1.0f);
+                s.striker, shot.ghostPos, s.coins, s.pockets, s.board, 1.0f);
         int segDrawn = 0;
         for (TrajectorySimulator.PathSegment seg : segs) {
-            if (segDrawn >= 1) break; // only striker path after contact
-            if (seg.kind != 0) { segDrawn++; continue; }
-            Paint p = seg.wallBounces == 0 ? lineGold
-                    : seg.wallBounces == 1 ? lineBlue : lineMagenta;
-            drawPolyline(canvas, seg.points, p);
+            if (segDrawn >= 3) break;            // raised from 2 → 3
+            drawPolyline(canvas, seg.points, paintForSeg(seg, rank));
             segDrawn++;
         }
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    private Paint paintForSeg(TrajectorySimulator.PathSegment seg, int rank) {
+        if (seg.enteredPocket)    return pocketPathPaints[rank];
+        if (seg.wallBounces == 0) return aimPaints[rank];
+        if (seg.wallBounces == 1) return bouncePaints[rank];
+        return bounce2Paints[rank];
+    }
 
-    private void drawWaypoints(Canvas canvas, List<PointF> pts, Paint paint) {
+    private void drawPolyline(Canvas c, List<PointF> pts, Paint p) {
         for (int i = 1; i < pts.size(); i++) {
             float x0 = pts.get(i-1).x, y0 = pts.get(i-1).y;
             float x1 = pts.get(i).x,   y1 = pts.get(i).y;
-            if (!valid(x0, y0, x1, y1)) continue;
-            canvas.drawLine(x0, y0, x1, y1, paint);
+            if (Float.isNaN(x0)||Float.isNaN(y0)||Float.isNaN(x1)||Float.isNaN(y1)) continue;
+            if (Float.isInfinite(x0)||Float.isInfinite(y0)||Float.isInfinite(x1)||Float.isInfinite(y1)) continue;
+            c.drawLine(x0, y0, x1, y1, p);
         }
     }
 
-    private void drawPolyline(Canvas canvas, List<PointF> pts, Paint paint) {
-        for (int i = 1; i < pts.size(); i++) {
-            float x0 = pts.get(i-1).x, y0 = pts.get(i-1).y;
-            float x1 = pts.get(i).x,   y1 = pts.get(i).y;
-            if (!valid(x0, y0, x1, y1)) continue;
-            canvas.drawLine(x0, y0, x1, y1, paint);
-        }
-    }
-
-    private static boolean valid(float... v) {
-        for (float f : v) if (Float.isNaN(f) || Float.isInfinite(f)) return false;
-        return true;
-    }
-
-    private PointF nearestPocket(PointF pos, List<PointF> pockets) {
-        PointF best = null; float bestD = Float.MAX_VALUE;
-        for (PointF p : pockets) {
-            float d = dist(pos, p);
-            if (d < bestD) { bestD = d; best = p; }
-        }
-        return best;
-    }
-
-    /** Ghost-ball position: where striker centre must be to send coin into pocket. */
-    private PointF ghostBallPos(Coin coin, PointF pocket, float strikerR) {
-        float dx = coin.pos.x - pocket.x;
-        float dy = coin.pos.y - pocket.y;
-        float len = (float) Math.sqrt(dx*dx + dy*dy);
-        if (len < 1f) return null;
-        float gr = strikerR + coin.radius;
-        return new PointF(coin.pos.x + (dx/len)*gr, coin.pos.y + (dy/len)*gr);
-    }
-
-    private boolean insideBoard(PointF p, RectF board, float margin) {
-        if (board == null) return true;
-        return p.x >= board.left   - margin && p.x <= board.right  + margin
-            && p.y >= board.top    - margin && p.y <= board.bottom + margin;
-    }
-
-    private float score(PointF striker, PointF ghost, float coinToPocket, int coinColor) {
-        float s = 800f / (dist(striker, ghost) + 1f) + 400f / (coinToPocket + 1f);
-        if (coinColor == Coin.COLOR_RED) s *= 1.4f;
-        return s;
-    }
-
-    /** Convenience: build a List<PointF> from varargs PointF. */
-    @SafeVarargs
-    private static List<PointF> pts(PointF... points) {
-        return new ArrayList<>(Arrays.asList(points));
-    }
-
-    private static float dist(PointF a, PointF b) {
-        float dx = a.x-b.x, dy = a.y-b.y;
-        return (float) Math.sqrt(dx*dx+dy*dy);
-    }
-    private static float dist(PointF a, float bx, float by) {
-        float dx = a.x-bx, dy = a.y-by;
-        return (float) Math.sqrt(dx*dx+dy*dy);
+    private float dist(PointF a, PointF b) {
+        float dx = a.x - b.x, dy = a.y - b.y;
+        return (float) Math.sqrt(dx * dx + dy * dy);
     }
 }

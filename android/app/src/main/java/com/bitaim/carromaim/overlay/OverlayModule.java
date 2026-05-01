@@ -35,7 +35,7 @@ public class OverlayModule extends ReactContextBaseJavaModule {
     @NonNull @Override
     public String getName() { return "OverlayModule"; }
 
-    // ── Overlay permission ────────────────────────────────────────────────────
+    // ── Overlay permission ─────────────���──────────────────────────────────────
 
     @ReactMethod
     public void canDrawOverlays(Promise p) {
@@ -126,7 +126,7 @@ public class OverlayModule extends ReactContextBaseJavaModule {
         if (c != null) c.setDetectionParam(v);
     }
 
-    // ── AutoPlay ──────────────────────────────────────────────────────────────
+    // ── AutoPlay ──────────────────────────────────────────────────��───────────
 
     /**
      * Enable or disable the auto-shoot feature.

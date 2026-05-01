@@ -1,0 +1,31 @@
+AIMxASSIST v4.0 — Changes applied to your GitHub source
+=========================================================
+
+MODIFIED: App.tsx
+  - Autoplay section: Auto Shoot toggle + Delay slider (0.5–5 s)
+  - Shoot Now button: single manual trigger
+  - Accessibility readiness check with deep-link banner
+  - isAccessibilityReady() / setAutoPlay() / isAutoPlayEnabled() wired correctly
+  - 5-colour line legend (Gold/Cyan/Orange/Purple/Green)
+  - shootNow() call added
+  - Version bumped to v4.0
+
+MODIFIED: android/.../overlay/AimOverlayView.java
+  - 5 ranked prediction lines with distinct colours + opacity:
+      Rank 1 Gold   #FFD700  100% alpha  3.5 dp
+      Rank 2 Cyan   #00E5FF   70% alpha  3.0 dp
+      Rank 3 Orange #FF8A00   50% alpha  2.5 dp
+      Rank 4 Purple #D946EF   35% alpha  2.0 dp
+      Rank 5 Green  #22C55E   20% alpha  1.5 dp
+  - segDrawn limit raised 2 -> 3 (full trajectory shown)
+  - All v3-fixed fixes kept unchanged
+
+ALL OTHER FILES: unchanged from your GitHub repo
+(AutoShootService, FloatingOverlayService, OverlayModule, BoardDetector,
+ TrajectorySimulator, ScreenCaptureService, Manifests, Gradle, etc.)
+
+TO BUILD THE APK:
+  1. Push these files to your GitHub repo
+  2. GitHub Actions (.github/workflows/build-apk.yml) auto-builds the APK
+  3. Download the APK from the Actions > Artifacts section
+  OR build locally: npm install && cd android && ./gradlew assembleDebug

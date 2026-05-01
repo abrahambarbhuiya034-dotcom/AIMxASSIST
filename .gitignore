@@ -1,0 +1,16 @@
+node_modules/
+.gradle/
+.idea/
+*.iml
+local.properties
+android/app/build/
+android/build/
+android/.gradle/
+android/app/src/main/assets/index.android.bundle
+android/app/src/main/res/drawable-*
+android/app/src/main/res/raw/
+*.keystore
+!debug.keystore
+.env
+npm-debug.log
+yarn-error.log

@@ -256,7 +256,7 @@ public class FloatingOverlayService extends Service {
         windowManager.addView(aimOverlayView, overlayParams);
     }
 
-    // ── External API ──────────────────────────────────────────────────────────
+    // ── External API ───────────────────────────────────────────���──────────────
 
     public void setShotMode(String mode)            { if (aimOverlayView != null) aimOverlayView.setShotMode(mode); }
     public void setMarginOffset(float dx, float dy) { }
