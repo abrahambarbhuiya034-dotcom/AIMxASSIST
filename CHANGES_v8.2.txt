@@ -1,0 +1,112 @@
+AIMxASSIST v8.2 — Board Calibration + Detection + Autoplay Overhaul
+======================================================================
+
+BUGS FIXED
+──────────
+
+1. Overlay shows a small board  [BoardDetector.java + FloatingOverlayService.java]
+
+   ROOT CAUSE A — Demo state used w×0.80 board size. On tall phones (18:9,
+   20:9) this rendered a board much smaller than the actual game board.
+
+   ROOT CAUSE B — Pocket inset was 3% of board. Real measurement is
+   4.45 cm / 74 cm = 6.0% → pockets appeared inside the playing surface
+   instead of in the corners.
+
+   ROOT CAUSE C — Demo board centre (h×0.44) didn't match the live-CV
+   board position, so switching from demo→live caused visible board jump.
+
+   FIX: Demo state now uses the exact same formula as BoardDetector's
+   smartFallback: side = min(w×0.92, usableH×0.90) with usableH deducting
+   8% top / 5% bottom for game-UI bars. Both always produce the same board.
+   Pocket inset corrected to 6.0% (0.060f). Pocket draw radius corrected
+   to 3.0% of board width (was fixed 13 dp).
+
+2. Lines stop working when OpenCV / board detection is on
+   [BoardDetector.java]
+
+   ROOT CAUSE: isOrange() matched only a narrow orange hue. Most game apps
+   render the board border in a wider range of warm wood tones (light tan,
+   mahogany, reddish-brown) or even green felt. When no orange pixels were
+   found the code fell back to a wrong-sized / wrong-positioned board →
+   all AI shots clipped to nothing → nothing drawn.
+
+   FIX: isBoardBorder() now detects four categories:
+     a. Classic orange / warm wood  (original)
+     b. Dark brown / mahogany
+     c. Light tan / pale wood
+     d. Green felt (some modern apps)
+   A secondary detection method (detectByPocketCorners) was added: it
+   scans the four image corners for very dark blobs (the pocket holes) and
+   reconstructs the board square from their positions. As a last resort,
+   smartFallback() fills 88% of the usable screen area — guaranteed to
+   cover the actual game board regardless of colour scheme.
+
+3. Board detection shows but is in wrong position / too small
+   [BoardDetector.java]
+
+   ROOT CAUSE: Old fallbackBoardPx used w×0.72 in the downscaled proc
+   space (360 px), producing a board smaller than the actual game area.
+   Also, after scaling back to screen space and then ScreenCaptureService
+   applying its own scale, the compound scaling was slightly off.
+
+   FIX: smartFallback() calculates directly in proc space using the same
+   proportional formula used for the demo state so the result is always
+   consistent with real game screen proportions.
+
+4. Autoplay not firing  [FloatingOverlayService.java]
+
+   ROOT CAUSE: Wrong board position (bug #2) meant the detected striker
+   coordinates bounced around by 20–50 px per frame. STABLE_THRESH_PX = 20
+   was exceeded every frame → stableFrames never reached 10 → no shot.
+
+   FIX (two parts):
+     a. Board detection fixed (see #2) → striker coords now stable.
+     b. STABLE_THRESH_PX raised 20 → 40 px as additional safety margin.
+        STABLE_FRAMES_NEEDED reduced 10 → 6 so the shot fires ~200 ms
+        faster once the board is genuinely stable.
+        PREFETCH_FRAMES reduced 3 → 2 so physics pre-computation starts
+        earlier relative to the shorter stability window.
+
+5. Aim lines move / jitter  [AimOverlayView.java]
+
+   ROOT CAUSE A — CACHE_THRESH_PX = 4 px: any 4-pixel CV noise triggered
+   a full physics recomputation and visual update every frame.
+
+   ROOT CAUSE B — EMA_ALPHA = 0.18 in the overlay, but BoardDetector used
+   EMA_A = 0.18 too. Two independent fast-responding EMAs in series amplify
+   small oscillations instead of damping them.
+
+   FIX:
+     a. CACHE_THRESH_PX raised 4 → 15 px. The trajectory cache is only
+        rebuilt when the striker genuinely moves 15+ pixels. 5–10 px CV
+        noise no longer causes a redraw.
+     b. EMA_ALPHA lowered 0.18 → 0.10, matching BoardDetector's new EMA_A
+        = 0.10. The overlay now uses the same smoothing time constant as
+        detection, preventing oscillation.
+     c. BoardDetector EMA_A lowered 0.18 → 0.10 (smoother board rect
+        tracking, which is the root source of all downstream jitter).
+
+PHYSICAL CALIBRATION  (applied throughout)
+──────────────────────────────────────────
+  Board (outer):       74.0 cm  ──────── reference dimension
+  Playing surface:     71.1 cm  =  96.1 % of outer
+  Frame width:          3.8 cm  =   5.1 % of outer (each side)
+  Pocket diameter:      4.45 cm
+  Pocket centre inset:  4.45 / 74 = 6.0 %   ← corrected from 3.0 %
+  Coin diameter:        3.18 cm = 4.3 %   → radius = 2.15 % ✓
+  Striker diameter:     4.13 cm = 5.6 %   → radius = 2.8 %
+  Striker baseline Y:  11.1 cm from bottom inner edge
+                       = (11.1 + 3.8) / 74 from bottom outer
+                       = 20.1 % from bottom = 79.9 % from top → 0.800f
+  Centre circle dia:   17.0 cm = 23.0 % of board
+  Striker zone width:  23.0 cm = 31.1 % of board, centred
+
+UNCHANGED
+─────────
+  TrajectorySimulator.java  — physics unchanged
+  CarromAI.java             — AI geometry unchanged
+  AutoShootService.java     — gesture injection unchanged
+  OverlayModule.java        — React Native bridge unchanged
+  ScreenCaptureService.java — screen capture unchanged
+  App.tsx                   — version string already v8.1

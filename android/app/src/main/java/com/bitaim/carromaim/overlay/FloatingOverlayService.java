@@ -69,14 +69,19 @@ public class FloatingOverlayService extends Service {
     private static final int    NOTIF_ID   = 1001;
 
     // ── Responsiveness tuning ─────────────────────────────────────────────────
-    private static final int   STABLE_FRAMES_NEEDED = 10;
-    private static final int   PREFETCH_FRAMES      = 3;
+    /**
+     * Frames that must be stable before autoplay fires.
+     * Reduced 10 → 6 so the shot fires ~200 ms sooner once the board settles.
+     */
+    private static final int   STABLE_FRAMES_NEEDED = 6;
+    private static final int   PREFETCH_FRAMES      = 2;
     /**
      * Maximum striker movement (px) counted as "stable".
-     * Raised from 10 → 20 so ordinary CV pixel-jitter does not reset the
-     * stability counter on every frame.
+     * Raised 20 → 40 px so CV-detection jitter (typically 5–20 px/frame)
+     * does not reset the stability counter. Only genuine striker movement
+     * (>40 px) will reset.
      */
-    private static final float STABLE_THRESH_PX     = 20f;
+    private static final float STABLE_THRESH_PX     = 40f;
     private static final long  SHOOT_COOLDOWN_MS    = 1800L;
 
     public static volatile FloatingOverlayService INSTANCE;
@@ -145,29 +150,54 @@ public class FloatingOverlayService extends Service {
         DisplayMetrics dm = getResources().getDisplayMetrics();
         int w = dm.widthPixels, h = dm.heightPixels;
         GameState s = new GameState();
-        float side = w * 0.80f, cx = w/2f, cy = h * 0.44f;
-        s.board = new RectF(cx-side/2f, cy-side/2f, cx+side/2f, cy+side/2f);
-        float r = side * 0.024f;
-        s.striker = new Coin(cx, cy+side*0.34f, r*1.15f, Coin.COLOR_STRIKER, true);
 
+        // Match BoardDetector.smartFallback proportions so the demo
+        // board looks exactly like the live-CV board would when detected.
+        int uiTop    = (int)(h * 0.08f);
+        int uiBottom = (int)(h * 0.05f);
+        int usableH  = h - uiTop - uiBottom;
+        float side   = Math.min(w * 0.92f, usableH * 0.90f);
+        float cx     = w / 2f;
+        float cy     = uiTop + usableH * 0.50f;
+
+        s.board = new RectF(cx-side/2f, cy-side/2f, cx+side/2f, cy+side/2f);
+
+        // Coin radius ≈ 3.18 cm / 74 cm ≈ 2.2 % of board
+        float r = side * 0.022f;
+        // Striker at baseline: 11.1 cm from bottom inner = 80.0 % from top
+        float strikerY = s.board.top + side * 0.800f;
+        s.striker = new Coin(cx, strikerY, r * 1.28f, Coin.COLOR_STRIKER, true);
+
+        // Starting layout: 9 white, 9 black, 1 red (queen) around centre
         float[][] coins = {
-            {cx,              cy,              0, Coin.COLOR_RED},
-            {cx-side*.10f,    cy-side*.07f,    0, Coin.COLOR_WHITE},
-            {cx+side*.10f,    cy-side*.07f,    0, Coin.COLOR_WHITE},
-            {cx-side*.20f,    cy+side*.08f,    0, Coin.COLOR_WHITE},
-            {cx+side*.20f,    cy+side*.08f,    0, Coin.COLOR_WHITE},
-            {cx,              cy-side*.21f,    0, Coin.COLOR_WHITE},
-            {cx-side*.07f,    cy+side*.08f,    0, Coin.COLOR_BLACK},
-            {cx+side*.07f,    cy+side*.08f,    0, Coin.COLOR_BLACK},
-            {cx-side*.24f,    cy-side*.12f,    0, Coin.COLOR_BLACK},
-            {cx+side*.24f,    cy-side*.12f,    0, Coin.COLOR_BLACK},
-            {cx-side*.16f,    cy+side*.18f,    0, Coin.COLOR_BLACK},
-            {cx+side*.16f,    cy+side*.18f,    0, Coin.COLOR_BLACK},
+            // Red queen — centre
+            {cx,              cy,              Coin.COLOR_RED},
+            // White coins
+            {cx-side*.08f,    cy-side*.10f,    Coin.COLOR_WHITE},
+            {cx+side*.08f,    cy-side*.10f,    Coin.COLOR_WHITE},
+            {cx-side*.16f,    cy-side*.05f,    Coin.COLOR_WHITE},
+            {cx+side*.16f,    cy-side*.05f,    Coin.COLOR_WHITE},
+            {cx,              cy-side*.17f,    Coin.COLOR_WHITE},
+            {cx-side*.08f,    cy+side*.10f,    Coin.COLOR_WHITE},
+            {cx+side*.08f,    cy+side*.10f,    Coin.COLOR_WHITE},
+            {cx,              cy+side*.17f,    Coin.COLOR_WHITE},
+            {cx-side*.16f,    cy+side*.05f,    Coin.COLOR_WHITE},
+            // Black coins
+            {cx+side*.16f,    cy+side*.05f,    Coin.COLOR_BLACK},
+            {cx-side*.24f,    cy-side*.12f,    Coin.COLOR_BLACK},
+            {cx+side*.24f,    cy-side*.12f,    Coin.COLOR_BLACK},
+            {cx-side*.24f,    cy+side*.12f,    Coin.COLOR_BLACK},
+            {cx+side*.24f,    cy+side*.12f,    Coin.COLOR_BLACK},
+            {cx,              cy+side*.26f,    Coin.COLOR_BLACK},
+            {cx-side*.14f,    cy+side*.26f,    Coin.COLOR_BLACK},
+            {cx+side*.14f,    cy+side*.26f,    Coin.COLOR_BLACK},
+            {cx,              cy-side*.26f,    Coin.COLOR_BLACK},
         };
         for (float[] c : coins)
-            s.coins.add(new Coin(c[0], c[1], r, (int)c[3], false));
+            s.coins.add(new Coin(c[0], c[1], r, (int)c[2], false));
 
-        float inset = side * 0.035f;
+        // Pocket positions: 4.45 cm / 74 cm ≈ 6.0 % inset from each corner
+        float inset = side * 0.060f;
         s.pockets.add(new PointF(s.board.left  + inset, s.board.top    + inset));
         s.pockets.add(new PointF(s.board.right - inset, s.board.top    + inset));
         s.pockets.add(new PointF(s.board.left  + inset, s.board.bottom - inset));

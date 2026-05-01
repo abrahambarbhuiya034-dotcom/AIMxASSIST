@@ -41,9 +41,18 @@ public class AimOverlayView extends View {
     public static final String MODE_LUCKY  = "LUCKY";
 
     private static final int   MAX_LINES       = 5;
-    private static final float EMA_ALPHA       = 0.18f;
-    /** Pixels the striker must move before trajectories are recomputed. */
-    private static final float CACHE_THRESH_PX = 4f;
+    /**
+     * EMA weight for new observation — lower = smoother lines.
+     * 0.10 matches BoardDetector's smoothing so the overlay tracks without
+     * oscillating when detection jitter is present.
+     */
+    private static final float EMA_ALPHA       = 0.10f;
+    /**
+     * Pixels the striker must move before trajectories are recomputed.
+     * 15 px is enough to ignore normal CV jitter (~5–10 px/frame) while
+     * still reacting to genuine striker repositioning.
+     */
+    private static final float CACHE_THRESH_PX = 15f;
     /** Max wall-bounce segments drawn per shot. */
     private static final int   MAX_BOUNCES     = 2;
 
@@ -336,8 +345,10 @@ public class AimOverlayView extends View {
                     board.centerX(), board.centerY(), watermarkPaint);
         }
 
+        // Pocket radius: 4.45 cm diameter / 74 cm board = 6.0 % of board → radius = 3.0 %
+        float pocketR = board != null ? board.width() * 0.030f : 13 * dp;
         for (PointF p : s.pockets)
-            canvas.drawCircle(p.x, p.y, 13*dp, pocketFill);
+            canvas.drawCircle(p.x, p.y, pocketR, pocketFill);
 
         // Use cached results — no physics recomputation every frame
         List<CarromAI.AiShot> shots = cachedShots;
