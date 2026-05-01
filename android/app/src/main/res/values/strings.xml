@@ -3,4 +3,5 @@
     <string name="app_name">AIMxASSIST</string>
     <string name="channel_name">AIMxASSIST Overlay</string>
     <string name="notif_text">Aim assist is running</string>
+    <string name="accessibility_service_description">AIMxASSIST AutoPlay — automatically shoots the striker by injecting swipe gestures. No root needed.</string>
 </resources>
