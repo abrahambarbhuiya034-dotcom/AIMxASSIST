@@ -14,6 +14,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
@@ -28,29 +29,37 @@ import androidx.core.app.NotificationCompat;
 
 import com.bitaim.carromaim.MainActivity;
 import com.bitaim.carromaim.R;
+import com.bitaim.carromaim.auto.AutoShootService;
 import com.bitaim.carromaim.cv.GameState;
 
 /**
- * FloatingOverlayService — v3
+ * FloatingOverlayService — v5 (autoplay edition)
  *
- * Changes:
- *  - Tapping the floating icon shows a small popup with a "Turn ON / Turn OFF"
- *    button instead of toggling directly.
- *  - The AimOverlayView is fully pass-through (FLAG_NOT_TOUCHABLE | FLAG_NOT_FOCUSABLE)
- *    so it never intercepts touches to the game.
- *  - App name updated to AIMxASSIST.
+ * Changes vs v4:
+ *  - AutoPlay: when enabled, watches for N consecutive stable frames
+ *    (board has stopped moving), then fires an auto-shoot gesture via
+ *    AutoShootService.  No root needed — uses Android Accessibility.
+ *  - Stability counter resets whenever the striker moves > STABLE_THRESH px.
+ *  - A 3-second cooldown prevents double-shooting.
+ *  - setAutoPlay(boolean) exposed to React Native via OverlayModule.
  */
 public class FloatingOverlayService extends Service {
 
+    private static final String TAG        = "FloatingOverlayService";
     private static final String CHANNEL_ID = "aimxassist_channel";
     private static final int    NOTIF_ID   = 1001;
 
+    // AutoPlay tuning
+    private static final int   STABLE_FRAMES_NEEDED = 18;   // ~0.6 s at 30 fps
+    private static final float STABLE_THRESH_PX     = 12f;  // px movement to reset counter
+    private static final long  SHOOT_COOLDOWN_MS    = 3500; // ms between shots
+
     public static volatile FloatingOverlayService INSTANCE;
 
-    private WindowManager windowManager;
-    private View          floatingBtnView;
+    private WindowManager  windowManager;
+    private View           floatingBtnView;
     private AimOverlayView aimOverlayView;
-    private View          popupView;           // small toggle popup
+    private View           popupView;
 
     private WindowManager.LayoutParams floatingBtnParams;
     private WindowManager.LayoutParams overlayParams;
@@ -61,11 +70,18 @@ public class FloatingOverlayService extends Service {
     private boolean overlayVisible = false;
     private boolean popupShowing   = false;
 
+    // AutoPlay state
+    private volatile boolean autoPlayEnabled    = false;
+    private int              stableFrames        = 0;
+    private float            lastStrikerX        = Float.NaN;
+    private float            lastStrikerY        = Float.NaN;
+    private long             lastShootTimeMs     = 0L;
+    private boolean          cooldownActive      = false;
+
     private final Handler handler = new Handler(Looper.getMainLooper());
     private float dp;
 
-    @Nullable @Override
-    public IBinder onBind(Intent intent) { return null; }
+    @Nullable @Override public IBinder onBind(Intent intent) { return null; }
 
     @Override
     public void onCreate() {
@@ -137,7 +153,6 @@ public class FloatingOverlayService extends Service {
         if (popupShowing) return;
         popupShowing = true;
 
-        // Build popup programmatically
         LinearLayout ll = new LinearLayout(this);
         ll.setOrientation(LinearLayout.VERTICAL);
         ll.setBackgroundColor(0xDD111111);
@@ -153,21 +168,42 @@ public class FloatingOverlayService extends Service {
         title.setGravity(Gravity.CENTER_HORIZONTAL);
         ll.addView(title);
 
-        // Toggle button
-        TextView btn = new TextView(this);
-        btn.setText(overlayVisible ? "⬛  Turn OFF" : "▶  Turn ON");
-        btn.setTextColor(overlayVisible ? 0xFFFF6B6B : 0xFF22C55E);
-        btn.setTextSize(15);
-        btn.setTypeface(Typeface.DEFAULT_BOLD);
-        btn.setGravity(Gravity.CENTER_HORIZONTAL);
-        btn.setPadding(pad*2, pad, pad*2, pad);
-        btn.setOnClickListener(vv -> {
-            toggleAimOverlay();
+        // Aim overlay toggle
+        TextView btnAim = new TextView(this);
+        btnAim.setText(overlayVisible ? "⬛  Lines OFF" : "▶  Lines ON");
+        btnAim.setTextColor(overlayVisible ? 0xFFFF6B6B : 0xFF22C55E);
+        btnAim.setTextSize(15);
+        btnAim.setTypeface(Typeface.DEFAULT_BOLD);
+        btnAim.setGravity(Gravity.CENTER_HORIZONTAL);
+        btnAim.setPadding(pad*2, pad, pad*2, pad);
+        btnAim.setOnClickListener(vv -> { toggleAimOverlay(); dismissPopup(); });
+        ll.addView(btnAim);
+
+        // AutoPlay toggle
+        TextView btnAuto = new TextView(this);
+        btnAuto.setText(autoPlayEnabled ? "🤖  AutoPlay OFF" : "🤖  AutoPlay ON");
+        btnAuto.setTextColor(autoPlayEnabled ? 0xFFFF6B6B : 0xFF6B99FF);
+        btnAuto.setTextSize(15);
+        btnAuto.setTypeface(Typeface.DEFAULT_BOLD);
+        btnAuto.setGravity(Gravity.CENTER_HORIZONTAL);
+        btnAuto.setPadding(pad*2, pad, pad*2, pad);
+        btnAuto.setOnClickListener(vv -> {
+            setAutoPlay(!autoPlayEnabled);
             dismissPopup();
         });
-        ll.addView(btn);
+        ll.addView(btnAuto);
 
-        // Dismiss on outside tap (handled by FLAG_WATCH_OUTSIDE_TOUCH + listener)
+        // AutoPlay status hint
+        if (autoPlayEnabled && !AutoShootService.isReady()) {
+            TextView hint = new TextView(this);
+            hint.setText("⚠ Enable Accessibility\nin Settings first!");
+            hint.setTextColor(0xFFFF8A00);
+            hint.setTextSize(11);
+            hint.setGravity(Gravity.CENTER_HORIZONTAL);
+            hint.setPadding(pad, pad/2, pad, 0);
+            ll.addView(hint);
+        }
+
         popupView = ll;
         popupParams = new WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
@@ -184,18 +220,14 @@ public class FloatingOverlayService extends Service {
             return false;
         });
         windowManager.addView(popupView, popupParams);
-
-        // Auto-dismiss after 4 s
-        handler.postDelayed(this::dismissPopup, 4000);
+        handler.postDelayed(this::dismissPopup, 5000);
     }
 
     private void dismissPopup() {
         if (!popupShowing) return;
         popupShowing = false;
         handler.removeCallbacksAndMessages(null);
-        try {
-            if (popupView != null) windowManager.removeView(popupView);
-        } catch (Exception ignored) {}
+        try { if (popupView != null) windowManager.removeView(popupView); } catch (Exception ignored) {}
         popupView = null;
     }
 
@@ -214,7 +246,6 @@ public class FloatingOverlayService extends Service {
                 WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.MATCH_PARENT,
                 overlayType(),
-                // NOT_TOUCHABLE = overlay never intercepts game touches
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                         | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                         | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
@@ -228,9 +259,74 @@ public class FloatingOverlayService extends Service {
     // ── External API ──────────────────────────────────────────────────────────
 
     public void setShotMode(String mode)            { if (aimOverlayView != null) aimOverlayView.setShotMode(mode); }
-    public void setMarginOffset(float dx, float dy) { /* auto calibrated */ }
-    public void setSensitivity(float value)         { /* removed */ }
-    public void onDetectedState(GameState s)        { if (aimOverlayView != null) aimOverlayView.setDetectedState(s); }
+    public void setMarginOffset(float dx, float dy) { }
+    public void setSensitivity(float value)         { }
+
+    /** Called by ScreenCaptureService on each new captured frame / detected state. */
+    public void onDetectedState(GameState s) {
+        if (aimOverlayView != null) aimOverlayView.setDetectedState(s);
+        if (autoPlayEnabled && s != null && s.striker != null) {
+            handleAutoPlay(s);
+        }
+    }
+
+    /** Toggle AutoPlay from React Native UI or the floating popup. */
+    public void setAutoPlay(boolean enabled) {
+        autoPlayEnabled = enabled;
+        stableFrames    = 0;
+        Log.i(TAG, "AutoPlay " + (enabled ? "ON" : "OFF"));
+    }
+
+    public boolean isAutoPlayEnabled() { return autoPlayEnabled; }
+
+    // ── AutoPlay logic ────────────────────────────────────────────────────────
+
+    private void handleAutoPlay(GameState s) {
+        // Must have accessibility service connected
+        if (!AutoShootService.isReady()) return;
+
+        // Cooldown: don't shoot if we just shot recently
+        long now = System.currentTimeMillis();
+        if (cooldownActive) {
+            if (now - lastShootTimeMs < SHOOT_COOLDOWN_MS) return;
+            cooldownActive = false;
+        }
+
+        float sx = s.striker.pos.x;
+        float sy = s.striker.pos.y;
+
+        // Check if striker has moved since last frame
+        if (!Float.isNaN(lastStrikerX)) {
+            float moved = (float) Math.sqrt((sx - lastStrikerX)*(sx - lastStrikerX)
+                                          + (sy - lastStrikerY)*(sy - lastStrikerY));
+            if (moved > STABLE_THRESH_PX) {
+                // Striker is still moving — board is not ready
+                stableFrames = 0;
+            } else {
+                stableFrames++;
+            }
+        }
+        lastStrikerX = sx;
+        lastStrikerY = sy;
+
+        if (stableFrames >= STABLE_FRAMES_NEEDED) {
+            // Board has been stable long enough — fire the best shot
+            AimOverlayView.BestShot best = (aimOverlayView != null)
+                    ? aimOverlayView.getLastBestShot() : null;
+
+            if (best != null) {
+                Log.i(TAG, "AutoPlay: shooting ("+ best.strikerX +","+ best.strikerY
+                        +") → ("+ best.targetX +","+ best.targetY +")");
+                AutoShootService.INSTANCE.shoot(
+                        best.strikerX, best.strikerY,
+                        best.targetX,  best.targetY,
+                        0.72f);   // 72% power — adjust as needed
+                lastShootTimeMs = now;
+                cooldownActive  = true;
+                stableFrames    = 0;
+            }
+        }
+    }
 
     // ── Notification ──────────────────────────────────────────────────────────
 
@@ -255,12 +351,12 @@ public class FloatingOverlayService extends Service {
         stopIntent.setAction("ACTION_STOP");
         int piFlags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
                 ? PendingIntent.FLAG_IMMUTABLE : 0;
-        PendingIntent stopPi = PendingIntent.getService(this, 0, stopIntent, piFlags);
-        Intent openIntent   = new Intent(this, MainActivity.class);
-        PendingIntent openPi = PendingIntent.getActivity(this, 1, openIntent, piFlags);
+        PendingIntent stopPi  = PendingIntent.getService(this, 0, stopIntent, piFlags);
+        Intent openIntent     = new Intent(this, MainActivity.class);
+        PendingIntent openPi  = PendingIntent.getActivity(this, 1, openIntent, piFlags);
         return new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle("AIMxASSIST Active")
-                .setContentText("Tap floating icon in game to toggle aim lines")
+                .setContentText("Floating icon → toggle aim / autoplay")
                 .setSmallIcon(R.mipmap.ic_launcher)
                 .setContentIntent(openPi)
                 .addAction(0, "Stop", stopPi)
