@@ -73,12 +73,13 @@ public class AutoShootService extends AccessibilityService {
         float nx = dx / len;
         float ny = dy / len;
 
-        // Swipe: start at striker, flick toward target.
-        // Longer swipe = harder shot. Range: 80 px (soft) to 280 px (hard).
-        float swipeDist = 80f + powerFrac * 200f;
+        // Always shoot at FULL power — longest swipe, fastest flick.
+        // swipeDist: 600 px ensures the game registers maximum force.
+        // Pull back 40 px first so the game detects the full flick travel.
+        float swipeDist = 600f;
 
-        float fromX = strikerX;
-        float fromY = strikerY;
+        float fromX = strikerX - nx * 40f;   // slight pull-back start
+        float fromY = strikerY - ny * 40f;
         float toX   = strikerX + nx * swipeDist;
         float toY   = strikerY + ny * swipeDist;
 
@@ -86,8 +87,8 @@ public class AutoShootService extends AccessibilityService {
         path.moveTo(fromX, fromY);
         path.lineTo(toX, toY);
 
-        // Duration: fast flick 60–120 ms (shorter = harder hit)
-        long durationMs = (long)(120 - powerFrac * 60);
+        // 40 ms — hardest possible flick the game can register
+        long durationMs = 40L;
 
         GestureDescription.Builder gb = new GestureDescription.Builder();
         gb.addStroke(new GestureDescription.StrokeDescription(path, 0L, durationMs));

@@ -393,8 +393,7 @@ public class FloatingOverlayService extends Service {
             (fromX, fromY, toX, toY, durationMs, powerFrac) -> {
                 AutoShootService svc = AutoShootService.INSTANCE;
                 if (svc == null) return;
-                svc.shoot(fromX, fromY, toX, toY,
-                          Math.min(1.0f, Math.max(0.35f, powerFrac)));
+                svc.shoot(fromX, fromY, toX, toY, 1.0f);
             });
 
         overlayParams = new WindowManager.LayoutParams(
@@ -442,7 +441,7 @@ public class FloatingOverlayService extends Service {
             (aimOverlayView != null) ? aimOverlayView.getLastBestShot() : null;
         if (best == null) { Log.w(TAG, "shootNow: no live shot cached"); return; }
         Log.i(TAG, "shootNow: dispatching");
-        acc.shoot(best.strikerX, best.strikerY, best.targetX, best.targetY, best.powerFrac);
+        acc.shoot(best.strikerX, best.strikerY, best.targetX, best.targetY, 1.0f);
     }
 
     public void setAutoPlay(boolean enabled) {
@@ -531,26 +530,24 @@ public class FloatingOverlayService extends Service {
         if (physShot != null) {
             float dx = physShot.ghostPos.x - s.striker.pos.x;
             float dy = physShot.ghostPos.y - s.striker.pos.y;
-            float factor = 1.20f;
+            // factor 2.5 → swipe target well past the coin for full-power hit
+            float factor = 2.5f;
             float toX = s.striker.pos.x + dx * factor;
             float toY = s.striker.pos.y + dy * factor;
-            float pwr = Math.min(1.0f, Math.max(0.35f, physShot.powerFrac));
             Log.i(TAG, String.format(
-                "AutoPlay PHYSICS: stable=%d pwr=%.2f target=(%.0f,%.0f)",
-                stableFrames, pwr, toX, toY));
+                "AutoPlay PHYSICS FULL-POWER: stable=%d target=(%.0f,%.0f)",
+                stableFrames, toX, toY));
             AutoShootService.INSTANCE.shoot(s.striker.pos.x, s.striker.pos.y,
-                                            toX, toY, pwr);
+                                            toX, toY, 1.0f);
         } else {
-            // Fallback to geometry-based cached shot
             AimOverlayView.BestShot best =
                 (aimOverlayView != null) ? aimOverlayView.getLastBestShot() : null;
             if (best == null) return;
             Log.i(TAG, String.format(
-                "AutoPlay GEO FALLBACK: stable=%d pwr=%.2f",
-                stableFrames, best.powerFrac));
+                "AutoPlay GEO FALLBACK FULL-POWER: stable=%d", stableFrames));
             AutoShootService.INSTANCE.shoot(
                 best.strikerX, best.strikerY,
-                best.targetX,  best.targetY, best.powerFrac);
+                best.targetX,  best.targetY, 1.0f);
         }
 
         lastShootTimeMs = now;
