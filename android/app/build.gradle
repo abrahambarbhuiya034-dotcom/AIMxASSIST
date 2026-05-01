@@ -1,0 +1,70 @@
+apply plugin: "com.android.application"
+apply plugin: "kotlin-android"
+apply plugin: "com.facebook.react"
+
+react {
+    // React Native config — auto-links native modules
+}
+
+android {
+    namespace "com.bitaim.carromaim"
+    compileSdkVersion 34
+
+    defaultConfig {
+        applicationId "com.bitaim.carromaim"
+        minSdkVersion 23          // Android 6.0 Marshmallow
+        targetSdkVersion 34       // Android 14
+        versionCode 2
+        versionName "2.0"
+        multiDexEnabled true
+
+        // Keep APK reasonable — OpenCV adds ~30MB per ABI; ship the two common ones.
+        ndk {
+            abiFilters "armeabi-v7a", "arm64-v8a"
+        }
+    }
+
+    packagingOptions {
+        // OpenCV ships duplicate .so resources across ABIs that confuse Gradle.
+        pickFirst "lib/*/libc++_shared.so"
+        pickFirst "lib/*/libopencv_java4.so"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"),
+                    "proguard-rules.pro"
+            signingConfig signingConfigs.debug  // replace with release keystore
+        }
+        debug {
+            debuggable true
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+
+    kotlinOptions {
+        jvmTarget = "11"
+    }
+}
+
+dependencies {
+    implementation "com.facebook.react:react-android"
+    implementation "com.facebook.react:hermes-android"
+
+    implementation "androidx.appcompat:appcompat:1.6.1"
+    implementation "androidx.core:core-ktx:1.10.1"
+    implementation "com.google.android.material:material:1.9.0"
+    implementation "androidx.multidex:multidex:2.0.1"
+
+    // OpenCV Android SDK — used for HoughCircles, color classification.
+    // Resolved from JitPack (configured in root build.gradle).
+    implementation "com.quickbirdstudios:opencv:4.5.3.0"
+}
+
+apply from: file("../../node_modules/@react-native-community/cli-platform-android/native_modules.gradle")
+applyNativeModulesAppBuildGradle(project)
