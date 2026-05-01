@@ -5,6 +5,7 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.DashPathEffect;
 import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.PointF;
 import android.graphics.RectF;
 import android.os.Handler;
@@ -111,6 +112,13 @@ public class AimOverlayView extends View {
     private final Paint blackFill, whiteFill, redFill;
     private final Paint watermarkPaint;
 
+    // ── Screenshot-style per-coin-color line paints ───────────────────────────
+    private final Paint redLinePaint, yellowLinePaint, blackLinePaint;
+    private final Paint redDotPaint,  yellowDotPaint,  blackDotPaint;
+    private final Paint strikerLinePaint;
+    private final Paint cyanLinePaint;
+    private final Paint arrowPaint;
+
     public AimOverlayView(Context context) {
         super(context);
         dp = context.getResources().getDisplayMetrics().density;
@@ -139,7 +147,42 @@ public class AimOverlayView extends View {
         watermarkPaint.setTextAlign(Paint.Align.CENTER);
         watermarkPaint.setShadowLayer(1 * dp, 0, 0, Color.BLACK);
 
+        // ── Screenshot-style paints ───────────────────────────────────────────
+        redLinePaint    = thickLine(0xFFFF2222, 3.5f);
+        yellowLinePaint = thickLine(0xFFFFDD00, 3.5f);
+        blackLinePaint  = thickLine(0xFF888888, 3.0f);
+
+        redDotPaint     = dotFill(0xFFFF2222);
+        yellowDotPaint  = dotFill(0xFFFFDD00);
+        blackDotPaint   = dotFill(0xFF888888);
+
+        strikerLinePaint = thickLine(0xFFFFFFFF, 3.5f);
+        cyanLinePaint    = thickLine(0xFF00E5FF, 3.0f);
+
+        arrowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        arrowPaint.setColor(0xFFFF8C00);
+        arrowPaint.setStyle(Paint.Style.FILL);
+
         setLayerType(LAYER_TYPE_SOFTWARE, null);
+    }
+
+    private Paint thickLine(int color, float w) {
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        p.setColor(color);
+        p.setStyle(Paint.Style.STROKE);
+        p.setStrokeWidth(w * dp);
+        p.setStrokeCap(Paint.Cap.ROUND);
+        p.setStrokeJoin(Paint.Join.ROUND);
+        p.setShadowLayer(2 * dp, 0, 0, 0x88000000);
+        return p;
+    }
+
+    private Paint dotFill(int color) {
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        p.setColor(color);
+        p.setStyle(Paint.Style.FILL);
+        p.setShadowLayer(2 * dp, 0, 0, 0x88000000);
+        return p;
     }
 
     // ── Paint helpers ─────────────────────────────────────────────────────────
@@ -327,6 +370,24 @@ public class AimOverlayView extends View {
 
     private float ema(float p, float n) { return p + EMA_ALPHA * (n - p); }
 
+    // ── Per-coin color paints ─────────────────────────────────────────────────
+
+    private Paint coinLinePaint(int coinColor) {
+        switch (coinColor) {
+            case Coin.COLOR_RED:    return redLinePaint;
+            case Coin.COLOR_BLACK:  return blackLinePaint;
+            default:                return yellowLinePaint;
+        }
+    }
+
+    private Paint coinDotPaint(int coinColor) {
+        switch (coinColor) {
+            case Coin.COLOR_RED:    return redDotPaint;
+            case Coin.COLOR_BLACK:  return blackDotPaint;
+            default:                return yellowDotPaint;
+        }
+    }
+
     // ── Draw ──────────────────────────────────────────────────────────────────
 
     @Override
@@ -335,15 +396,75 @@ public class AimOverlayView extends View {
         GameState s = smoothed != null ? smoothed : detected;
         if (s == null || s.striker == null) return;
 
+        // Board outline
         if (s.board != null) {
             canvas.drawRect(s.board, boardPaint);
             canvas.drawText("created by abraham / Xhay",
                     s.board.centerX(), s.board.centerY(), watermarkPaint);
         }
 
+        // Pockets
         for (PointF p : s.pockets)
             canvas.drawCircle(p.x, p.y, 13 * dp, pocketFill);
 
+        if (!s.pockets.isEmpty()) {
+
+            // ── Draw every coin's line to its nearest pocket ──────────────────
+            for (Coin c : s.coins) {
+                if (c.color == Coin.COLOR_STRIKER) continue;
+                PointF nearestPocket = nearestPocket(c.pos, s.pockets);
+                if (nearestPocket == null) continue;
+
+                Paint linePaint = coinLinePaint(c.color);
+                Paint dotPaint  = coinDotPaint(c.color);
+
+                // Line from coin → pocket
+                canvas.drawLine(c.pos.x, c.pos.y,
+                        nearestPocket.x, nearestPocket.y, linePaint);
+
+                // Dot at coin end (filled circle)
+                canvas.drawCircle(c.pos.x, c.pos.y, 6 * dp, dotPaint);
+
+                // Small circle at pocket end
+                canvas.drawCircle(nearestPocket.x, nearestPocket.y, 8 * dp, dotPaint);
+            }
+
+            // ── Striker aim line to best shot ─────────────────────────────────
+            List<ShotCandidate> shots = computeBestShots(s);
+            if (!shots.isEmpty()) {
+                ShotCandidate best = shots.get(0);
+
+                // White aim line: striker → ghost contact point
+                canvas.drawLine(s.striker.pos.x, s.striker.pos.y,
+                        best.ghostPos.x, best.ghostPos.y, strikerLinePaint);
+
+                // Ghost ball circle at contact
+                canvas.drawCircle(best.ghostPos.x, best.ghostPos.y,
+                        s.striker.radius, coinOutlinePaint);
+
+                // Coin → pocket direction for best shot (cyan)
+                if (best.coin != null && best.pocket != null) {
+                    canvas.drawLine(best.coin.pos.x, best.coin.pos.y,
+                            best.pocket.x, best.pocket.y, cyanLinePaint);
+                }
+
+                // Orange arrow at striker showing aim direction
+                drawArrow(canvas, s.striker.pos, best.ghostPos);
+
+                // Post-contact trajectory (up to 3 segments)
+                List<TrajectorySimulator.PathSegment> segs = simulator.simulate(
+                        s.striker, best.ghostPos, s.coins, s.pockets, s.board, 1.0f);
+                int segDrawn = 0;
+                for (TrajectorySimulator.PathSegment seg : segs) {
+                    if (segDrawn >= 3) break;
+                    drawPolyline(canvas, seg.points,
+                            seg.wallBounces == 0 ? strikerLinePaint : bouncePaints[0]);
+                    segDrawn++;
+                }
+            }
+        }
+
+        // ── Draw coins on top of lines ────────────────────────────────────────
         for (Coin c : s.coins) {
             Paint f = c.color == Coin.COLOR_BLACK ? blackFill
                     : c.color == Coin.COLOR_RED   ? redFill : whiteFill;
@@ -351,17 +472,41 @@ public class AimOverlayView extends View {
             canvas.drawCircle(c.pos.x, c.pos.y, c.radius, coinOutlinePaint);
         }
 
+        // Striker
         canvas.drawCircle(s.striker.pos.x, s.striker.pos.y, s.striker.radius, whiteFill);
         canvas.drawCircle(s.striker.pos.x, s.striker.pos.y, s.striker.radius, strikerPaint);
+    }
 
-        // NEW: draw ALL shot candidates, each with its own colour + alpha rank
-        List<ShotCandidate> shots = computeBestShots(s);
-        int drawn = 0;
-        for (ShotCandidate shot : shots) {
-            if (drawn >= MAX_LINES) break;
-            drawShot(canvas, s, shot, drawn);   // pass rank index
-            drawn++;
+    private PointF nearestPocket(PointF pos, List<PointF> pockets) {
+        PointF best = null; float bestD = Float.MAX_VALUE;
+        for (PointF p : pockets) {
+            float d = dist(pos, p);
+            if (d < bestD) { bestD = d; best = p; }
         }
+        return best;
+    }
+
+    private void drawArrow(Canvas canvas, PointF from, PointF to) {
+        float dx = to.x - from.x, dy = to.y - from.y;
+        float len = (float) Math.sqrt(dx*dx + dy*dy);
+        if (len < 1f) return;
+        float ux = dx / len, uy = dy / len;
+
+        // Arrow tip at striker center offset toward target
+        float tipX = from.x + ux * 20 * dp;
+        float tipY = from.y + uy * 20 * dp;
+
+        float arrowLen = 14 * dp;
+        float arrowW   = 7  * dp;
+
+        Path path = new Path();
+        path.moveTo(tipX, tipY);
+        path.lineTo(tipX - ux * arrowLen + uy * arrowW,
+                    tipY - uy * arrowLen - ux * arrowW);
+        path.lineTo(tipX - ux * arrowLen - uy * arrowW,
+                    tipY - uy * arrowLen + ux * arrowW);
+        path.close();
+        canvas.drawPath(path, arrowPaint);
     }
 
     // ── Shot candidates ───────────────────────────────────────────────────────
@@ -442,48 +587,6 @@ public class AimOverlayView extends View {
     }
 
     // ── Drawing helpers ───────────────────────────────────────────────────────
-
-    /**
-     * Draw a single shot candidate using the paint set for the given rank index.
-     * rank=0 is the best shot (gold, 100% alpha); rank=4 is the weakest (green, 20%).
-     */
-    private void drawShot(Canvas canvas, GameState s, ShotCandidate shot, int rank) {
-        Paint aim      = aimPaints[rank];
-        Paint coinPath = coinPathPaints[rank];
-        Paint pocket   = pocketPathPaints[rank];
-
-        // Aim line: striker → ghost contact point
-        canvas.drawLine(s.striker.pos.x, s.striker.pos.y,
-                shot.ghostPos.x, shot.ghostPos.y, aim);
-
-        // Ghost ball circle at contact point
-        canvas.drawCircle(shot.ghostPos.x, shot.ghostPos.y,
-                s.striker.radius, coinOutlinePaint);
-
-        // Coin → pocket line
-        if (shot.coin != null && shot.pocket != null) {
-            canvas.drawLine(shot.coin.pos.x, shot.coin.pos.y,
-                    shot.pocket.x, shot.pocket.y, coinPath);
-            canvas.drawCircle(shot.pocket.x, shot.pocket.y, 16 * dp, pocket);
-        }
-
-        // Simulate striker trajectory after contact and draw up to 3 segments
-        List<TrajectorySimulator.PathSegment> segs = simulator.simulate(
-                s.striker, shot.ghostPos, s.coins, s.pockets, s.board, 1.0f);
-        int segDrawn = 0;
-        for (TrajectorySimulator.PathSegment seg : segs) {
-            if (segDrawn >= 3) break;            // raised from 2 → 3
-            drawPolyline(canvas, seg.points, paintForSeg(seg, rank));
-            segDrawn++;
-        }
-    }
-
-    private Paint paintForSeg(TrajectorySimulator.PathSegment seg, int rank) {
-        if (seg.enteredPocket)    return pocketPathPaints[rank];
-        if (seg.wallBounces == 0) return aimPaints[rank];
-        if (seg.wallBounces == 1) return bouncePaints[rank];
-        return bounce2Paints[rank];
-    }
 
     private void drawPolyline(Canvas c, List<PointF> pts, Paint p) {
         for (int i = 1; i < pts.size(); i++) {
