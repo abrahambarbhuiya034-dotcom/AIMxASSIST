@@ -31,7 +31,7 @@ jobs:
         run: pnpm install --no-frozen-lockfile
 
       - name: Install React Native (needed by Android Gradle)
-        run: npm install react-native@0.73.6 react@18.3.1 --prefix ./rn_host
+        run: npm install react-native@0.73.6 react@18.2.0 react-dom@18.2.0 --prefix ./rn_host --legacy-peer-deps
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
