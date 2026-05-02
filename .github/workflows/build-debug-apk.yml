@@ -19,7 +19,7 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Set up Node.js
+      - name: Set up Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -29,14 +29,13 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Enable pnpm
-        run: npm install -g pnpm@10
-
-      - name: Install JS dependencies (workspace)
-        run: pnpm install --no-frozen-lockfile
-
-      - name: Install React Native (needed by Android Gradle)
-        run: npm install react-native@0.73.6 react@18.2.0 react-dom@18.2.0 --prefix ./rn_host --legacy-peer-deps
+      - name: Install React Native at repo root
+        run: |
+          npm install \
+            react-native@0.73.6 \
+            react@18.2.0 \
+            react-dom@18.2.0 \
+            --legacy-peer-deps
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -47,13 +46,6 @@ jobs:
 
       - name: Generate local.properties
         run: echo "sdk.dir=$ANDROID_HOME" > android/local.properties
-
-      - name: Patch node_modules path in Gradle files
-        run: |
-          RN_PATH="$(pwd)/rn_host/node_modules"
-          sed -i "s|../node_modules|$RN_PATH|g" android/build.gradle
-          sed -i "s|../node_modules|$RN_PATH|g" android/app/build.gradle
-          sed -i "s|../node_modules|$RN_PATH|g" android/settings.gradle || true
 
       - name: Build Debug APK
         working-directory: android
