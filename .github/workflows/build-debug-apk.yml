@@ -24,7 +24,12 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Enable Corepack / pnpm
+      - name: Install Gradle 8.7
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: Enable pnpm
         run: npm install -g pnpm@10
 
       - name: Install JS dependencies (workspace)
@@ -43,19 +48,17 @@ jobs:
       - name: Generate local.properties
         run: echo "sdk.dir=$ANDROID_HOME" > android/local.properties
 
-      - name: Patch android/build.gradle node_modules path
+      - name: Patch node_modules path in Gradle files
         run: |
-          sed -i "s|../node_modules|$(pwd)/rn_host/node_modules|g" android/build.gradle
-          sed -i "s|../node_modules|$(pwd)/rn_host/node_modules|g" android/app/build.gradle
-          sed -i "s|../node_modules|$(pwd)/rn_host/node_modules|g" android/settings.gradle || true
+          RN_PATH="$(pwd)/rn_host/node_modules"
+          sed -i "s|../node_modules|$RN_PATH|g" android/build.gradle
+          sed -i "s|../node_modules|$RN_PATH|g" android/app/build.gradle
+          sed -i "s|../node_modules|$RN_PATH|g" android/settings.gradle || true
 
-      - name: Make gradlew executable
-        run: chmod +x android/gradlew 2>/dev/null || true
-
-      - name: Gradle build debug APK
+      - name: Build Debug APK
         working-directory: android
         run: |
-          ./gradlew assembleDebug \
+          gradle assembleDebug \
             -Dorg.gradle.jvmargs="-Xmx4g" \
             --no-daemon \
             --stacktrace
