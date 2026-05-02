@@ -1,7 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">AIMxASSIST</string>
-    <string name="channel_name">AIMxASSIST Overlay</string>
-    <string name="notif_text">Aim assist is running</string>
-    <string name="accessibility_service_description">AIMxASSIST AutoPlay — automatically shoots the striker by injecting swipe gestures. No root needed.</string>
+    <string name="accessibility_service_description">AIMxASSIST — auto-shoots the striker in Carrom Pool by injecting a swipe gesture. No root required. Disable when not playing.</string>
 </resources>

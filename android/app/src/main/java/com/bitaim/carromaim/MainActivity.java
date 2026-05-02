@@ -9,7 +9,6 @@ public class MainActivity extends ReactActivity {
 
     @Override
     protected String getMainComponentName() {
-        // Must match the "name" field in app.json exactly
         return "AIMxASSIST";
     }
 
@@ -18,7 +17,6 @@ public class MainActivity extends ReactActivity {
         return new DefaultReactActivityDelegate(
                 this,
                 getMainComponentName(),
-                DefaultNewArchitectureEntryPoint.getFabricEnabled()
-        );
+                DefaultNewArchitectureEntryPoint.getFabricEnabled());
     }
 }

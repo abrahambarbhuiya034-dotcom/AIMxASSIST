@@ -19,8 +19,8 @@ public class Coin {
         this.isStriker = isStriker;
     }
 
-    public static final int COLOR_WHITE = 0;
-    public static final int COLOR_BLACK = 1;
-    public static final int COLOR_RED   = 2;
+    public static final int COLOR_WHITE   = 0;
+    public static final int COLOR_BLACK   = 1;
+    public static final int COLOR_RED     = 2;
     public static final int COLOR_STRIKER = 3;
 }

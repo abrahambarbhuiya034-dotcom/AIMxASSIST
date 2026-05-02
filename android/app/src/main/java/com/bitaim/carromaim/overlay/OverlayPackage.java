@@ -10,12 +10,10 @@ import java.util.Collections;
 import java.util.List;
 
 public class OverlayPackage implements ReactPackage {
-
     @Override
     public List<NativeModule> createNativeModules(ReactApplicationContext ctx) {
         return Arrays.asList(new OverlayModule(ctx));
     }
-
     @Override
     public List<ViewManager> createViewManagers(ReactApplicationContext ctx) {
         return Collections.emptyList();

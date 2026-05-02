@@ -1,0 +1,70 @@
+name: Build Debug APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Enable Corepack / pnpm
+        run: npm install -g pnpm@10
+
+      - name: Install JS dependencies (workspace)
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Install React Native (needed by Android Gradle)
+        run: npm install react-native@0.73.6 react@18.3.1 --prefix ./rn_host
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 11076708
+          packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
+          accept-android-sdk-licenses: true
+
+      - name: Generate local.properties
+        run: echo "sdk.dir=$ANDROID_HOME" > android/local.properties
+
+      - name: Patch android/build.gradle node_modules path
+        run: |
+          sed -i "s|../node_modules|$(pwd)/rn_host/node_modules|g" android/build.gradle
+          sed -i "s|../node_modules|$(pwd)/rn_host/node_modules|g" android/app/build.gradle
+          sed -i "s|../node_modules|$(pwd)/rn_host/node_modules|g" android/settings.gradle || true
+
+      - name: Make gradlew executable
+        run: chmod +x android/gradlew 2>/dev/null || true
+
+      - name: Gradle build debug APK
+        working-directory: android
+        run: |
+          ./gradlew assembleDebug \
+            -Dorg.gradle.jvmargs="-Xmx4g" \
+            --no-daemon \
+            --stacktrace
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: AIMxASSIST-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30

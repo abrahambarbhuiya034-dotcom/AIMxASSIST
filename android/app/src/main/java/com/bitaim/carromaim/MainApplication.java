@@ -13,12 +13,8 @@ import java.util.List;
 
 public class MainApplication extends Application implements ReactApplication {
 
-    /**
-     * Kept for source-level compatibility — no longer used.
-     * BoardDetector is now pure Java and needs no OpenCV.
-     */
-    @SuppressWarnings("unused")
-    public static boolean cvReady = false;
+    /** Pure-Java BoardDetector — no OpenCV needed. */
+    public static final boolean cvReady = true;
 
     private final ReactNativeHost mReactNativeHost = new ReactNativeHost(this) {
         @Override public boolean getUseDeveloperSupport() { return false; }
@@ -34,13 +30,11 @@ public class MainApplication extends Application implements ReactApplication {
         protected String getJSMainModuleName() { return "index"; }
     };
 
-    @Override
-    public ReactNativeHost getReactNativeHost() { return mReactNativeHost; }
+    @Override public ReactNativeHost getReactNativeHost() { return mReactNativeHost; }
 
     @Override
     public void onCreate() {
         super.onCreate();
         SoLoader.init(this, false);
-        // BoardDetector uses pure Java Bitmap pixel analysis — no OpenCV needed.
     }
 }

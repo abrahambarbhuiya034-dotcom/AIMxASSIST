@@ -3,30 +3,21 @@ package com.bitaim.carromaim.auto;
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
 import android.graphics.Path;
-import android.graphics.PointF;
 import android.util.Log;
 import android.view.accessibility.AccessibilityEvent;
 
 /**
- * AutoShootService — Accessibility Service that injects swipe gestures
- * to automatically shoot the striker in Carrom Disc Pool.
+ * AutoShootService — Accessibility Service for gesture injection.
  *
- * How it works:
- *  1. FloatingOverlayService detects a stable board state (15+ consecutive
- *     frames with no movement) and calls shoot().
- *  2. shoot() dispatches a swipe gesture starting at the striker position
- *     and moving in the direction of the best shot target.
- *  3. The gesture simulates a human finger flick — identical to a real shot.
+ * Injects swipe gestures to automatically shoot the striker in Carrom Disc Pool.
+ * No root required — uses Android Accessibility API dispatchGesture().
  *
- * Setup (one-time, no root needed):
- *  - User enables "AIMxASSIST" in Settings → Accessibility → Installed Services
- *  - The app guides the user there via requestAccessibility() deep link.
+ * Setup: user enables "AIMxASSIST" in Settings → Accessibility → Installed Services.
  */
 public class AutoShootService extends AccessibilityService {
 
     private static final String TAG = "AutoShootService";
 
-    /** Singleton — set on connection, cleared on destroy. */
     public static volatile AutoShootService INSTANCE;
 
     @Override
@@ -36,15 +27,8 @@ public class AutoShootService extends AccessibilityService {
         Log.i(TAG, "AutoShootService connected — gesture injection ready");
     }
 
-    @Override
-    public void onAccessibilityEvent(AccessibilityEvent event) {
-        // We don't need to observe events — only inject gestures.
-    }
-
-    @Override
-    public void onInterrupt() {
-        Log.w(TAG, "AutoShootService interrupted");
-    }
+    @Override public void onAccessibilityEvent(AccessibilityEvent event) {}
+    @Override public void onInterrupt() { Log.w(TAG, "AutoShootService interrupted"); }
 
     @Override
     public void onDestroy() {
@@ -58,37 +42,26 @@ public class AutoShootService extends AccessibilityService {
      *
      * @param strikerX  striker centre X on screen (pixels)
      * @param strikerY  striker centre Y on screen (pixels)
-     * @param targetX   ghost-ball / aim target X on screen
-     * @param targetY   ghost-ball / aim target Y on screen
-     * @param powerFrac shot power 0.0 (soft) … 1.0 (hard), typically 0.7
+     * @param targetX   ghost-ball aim target X
+     * @param targetY   ghost-ball aim target Y
+     * @param powerFrac shot power 0.0 (soft) to 1.0 (hard)
      */
     public void shoot(float strikerX, float strikerY,
                       float targetX,  float targetY,
                       float powerFrac) {
-        // Direction from striker toward target
-        float dx = targetX - strikerX;
-        float dy = targetY - strikerY;
+        float dx = targetX - strikerX, dy = targetY - strikerY;
         float len = (float) Math.sqrt(dx*dx + dy*dy);
         if (len < 1f) return;
-        float nx = dx / len;
-        float ny = dy / len;
+        float nx = dx/len, ny = dy/len;
 
-        // Always shoot at FULL power — longest swipe, fastest flick.
-        // swipeDist: 600 px ensures the game registers maximum force.
-        // Pull back 40 px first so the game detects the full flick travel.
-        float swipeDist = 600f;
-
-        float fromX = strikerX - nx * 40f;   // slight pull-back start
-        float fromY = strikerY - ny * 40f;
-        float toX   = strikerX + nx * swipeDist;
-        float toY   = strikerY + ny * swipeDist;
+        // Adaptive swipe distance: 120 px (soft) to 360 px (hard)
+        float swipeDist = 120f + powerFrac * 240f;
 
         Path path = new Path();
-        path.moveTo(fromX, fromY);
-        path.lineTo(toX, toY);
+        path.moveTo(strikerX, strikerY);
+        path.lineTo(strikerX + nx * swipeDist, strikerY + ny * swipeDist);
 
-        // 40 ms — hardest possible flick the game can register
-        long durationMs = 40L;
+        long durationMs = (long)(120 - powerFrac * 60); // 60–120 ms flick
 
         GestureDescription.Builder gb = new GestureDescription.Builder();
         gb.addStroke(new GestureDescription.StrokeDescription(path, 0L, durationMs));
@@ -102,9 +75,8 @@ public class AutoShootService extends AccessibilityService {
             }
         }, null);
 
-        if (!ok) Log.e(TAG, "dispatchGesture returned false — service may not have gesture permission");
+        if (!ok) Log.e(TAG, "dispatchGesture=false — check gesture permission in accessibility config");
     }
 
-    /** @return true if this service is connected and ready. */
     public static boolean isReady() { return INSTANCE != null; }
 }

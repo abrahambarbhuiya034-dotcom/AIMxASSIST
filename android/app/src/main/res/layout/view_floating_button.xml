@@ -1,28 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-  Floating draggable button that sits on top of Carrom Pool.
-  Tap → toggle aim overlay
-  Drag → reposition anywhere on screen
--->
-<FrameLayout
-    xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="56dp"
-    android:layout_height="56dp">
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="52dp"
+    android:layout_height="52dp"
+    android:background="@drawable/floating_btn_bg"
+    android:elevation="8dp">
 
-    <!-- Shadow / background circle -->
-    <View
-        android:layout_width="52dp"
-        android:layout_height="52dp"
-        android:layout_gravity="center"
-        android:background="@drawable/floating_btn_bg" />
-
-    <!-- App icon -->
-    <ImageView
-        android:id="@+id/floating_icon"
-        android:layout_width="36dp"
-        android:layout_height="36dp"
-        android:layout_gravity="center"
-        android:src="@mipmap/ic_launcher"
-        android:contentDescription="Bit-Aim toggle" />
+    <TextView
+        android:id="@+id/btn_label"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:gravity="center"
+        android:text="⊕"
+        android:textColor="#FFD700"
+        android:textSize="28sp"
+        android:fontFamily="sans-serif-black" />
 
 </FrameLayout>

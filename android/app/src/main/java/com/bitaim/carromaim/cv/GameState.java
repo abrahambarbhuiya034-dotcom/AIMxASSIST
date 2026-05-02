@@ -11,10 +11,10 @@ import java.util.List;
  * Produced by BoardDetector, consumed by AimOverlayView and TrajectorySimulator.
  */
 public class GameState {
-    public RectF board;            // detected board bounding box (screen coords)
-    public Coin striker;           // detected striker (null if none found)
-    public List<Coin> coins = new ArrayList<>();   // all non-striker coins
-    public List<PointF> pockets = new ArrayList<>(); // pocket centers (screen coords)
+    public RectF board;
+    public Coin striker;
+    public List<Coin> coins = new ArrayList<>();
+    public List<PointF> pockets = new ArrayList<>();
     public long timestampMs;
 
     public GameState() {
