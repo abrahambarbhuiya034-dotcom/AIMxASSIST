@@ -1,10 +1,5 @@
 apply plugin: "com.android.application"
 apply plugin: "kotlin-android"
-apply plugin: "com.facebook.react"
-
-react {
-    // React Native auto-linking
-}
 
 android {
     namespace "com.bitaim.carromaim"
@@ -12,14 +7,12 @@ android {
 
     defaultConfig {
         applicationId "com.bitaim.carromaim"
-        minSdkVersion 23          // Android 6.0+
-        targetSdkVersion 34       // Android 14
+        minSdkVersion 23
+        targetSdkVersion 34
         versionCode 7
         versionName "8.4"
         multiDexEnabled true
 
-        // Pure-Java detector — no OpenCV .so needed.
-        // Keeping only arm variants makes APK ~20 MB smaller.
         ndk {
             abiFilters "armeabi-v7a", "arm64-v8a"
         }
@@ -30,7 +23,6 @@ android {
             minifyEnabled true
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"),
                     "proguard-rules.pro"
-            signingConfig signingConfigs.debug
         }
         debug {
             debuggable true
@@ -48,17 +40,9 @@ android {
 }
 
 dependencies {
-    implementation "com.facebook.react:react-android"
-    implementation "com.facebook.react:hermes-android"
-
     implementation "androidx.appcompat:appcompat:1.6.1"
     implementation "androidx.core:core-ktx:1.10.1"
     implementation "com.google.android.material:material:1.9.0"
     implementation "androidx.multidex:multidex:2.0.1"
-
-    // OpenCV removed — BoardDetector v10 uses pure Java Bitmap pixel APIs.
-    // APK ~30 MB smaller as a result.
+    implementation "androidx.constraintlayout:constraintlayout:2.1.4"
 }
-
-apply from: file("../../node_modules/@react-native-community/cli-platform-android/native_modules.gradle")
-applyNativeModulesAppBuildGradle(project)

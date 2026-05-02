@@ -19,24 +19,6 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Set up Node.js 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install Gradle 8.7
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: '8.7'
-
-      - name: Install React Native at repo root
-        run: |
-          npm install \
-            react-native@0.73.6 \
-            react@18.2.0 \
-            react-dom@18.2.0 \
-            --legacy-peer-deps
-
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
@@ -46,6 +28,11 @@ jobs:
 
       - name: Generate local.properties
         run: echo "sdk.dir=$ANDROID_HOME" > android/local.properties
+
+      - name: Install Gradle 8.7
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
 
       - name: Build Debug APK
         working-directory: android
